@@ -1,0 +1,8 @@
+{
+  "typescript": true,
+  "semi": true,
+  "singleQuote": true,
+  "trailingComma": "all",
+  "endOfLine": "auto",
+  "bracketSpacing": true
+}
