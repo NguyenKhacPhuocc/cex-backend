@@ -10,6 +10,11 @@ import { AuthModule } from './modules/auth/auth.module';
 import { UsersModule } from './modules/users/users.module';
 import { WalletsModule } from './modules/wallets/wallets.module';
 import { TransactionsModule } from './modules/transactions/transactions.module';
+import { MarketModule } from './modules/market/market.module';
+import { AdminModule } from './modules/admin/admin.module';
+import { OrderModule } from './modules/order/order.module';
+import { TradingModule } from './modules/trading/trading.module';
+import { MatchingEngineModule } from './modules/matching-engine/matching-engine.module';
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -25,10 +30,11 @@ import { TransactionsModule } from './modules/transactions/transactions.module';
     UsersModule,
     WalletsModule,
     TransactionsModule,
-    // MarketModule,
-    // OrderModule,
-    // TradesModule,
-    // TradingModule,
+    MarketModule,
+    AdminModule,
+    OrderModule,
+    TradingModule,
+    MatchingEngineModule,
   ],
   controllers: [AppController],
   providers: [AppService],

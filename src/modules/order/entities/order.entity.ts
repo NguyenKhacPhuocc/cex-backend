@@ -1,6 +1,7 @@
 import { Market } from 'src/modules/market/entities/market.entity';
 import { Trade } from 'src/modules/trades/entities/trade.entity';
 import { User } from 'src/modules/users/entities/user.entity';
+import { OrderSide, OrderStatus, OrderType } from 'src/shared/enums';
 import {
   Entity,
   PrimaryGeneratedColumn,
@@ -12,26 +13,10 @@ import {
   OneToMany,
 } from 'typeorm';
 
-export enum OrderSide {
-  BUY = 'buy',
-  SELL = 'sell',
-}
-
-export enum OrderType {
-  LIMIT = 'limit',
-  MARKET = 'market',
-}
-
-export enum OrderStatus {
-  OPEN = 'open',
-  FILLED = 'filled',
-  CANCELLED = 'cancelled',
-}
-
 @Entity('orders')
 export class Order {
   @PrimaryGeneratedColumn('uuid')
-  id: number;
+  id: string;
 
   @ManyToOne(() => User, (user) => user.orders, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'user_id' })

@@ -6,7 +6,7 @@ import * as IORedis from 'ioredis';
 
 @Injectable()
 export class RedisService {
-  constructor(@Inject('REDIS_CLIENT') private readonly client: IORedis.Redis) { }
+  constructor(@Inject('REDIS_CLIENT') private readonly client: IORedis.Redis) {}
 
   // --- STRING (key-value)
   async set(

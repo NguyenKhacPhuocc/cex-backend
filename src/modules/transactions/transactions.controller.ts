@@ -1,9 +1,9 @@
 // src/modules/wallets/wallets.controller.ts
 import { Controller, UseGuards, Get, Param } from '@nestjs/common';
-import { GetUser } from 'src/common/decorators/get-user.decorator';
 import { User } from '../users/entities/user.entity';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { TransactionsService } from './transactions.service';
+import { GetUser } from 'src/common/decorators/get-user.decorator';
 
 @Controller('transactions')
 @UseGuards(JwtAuthGuard)

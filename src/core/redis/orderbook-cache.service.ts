@@ -23,6 +23,7 @@ export class OrderBookCacheService {
       order.price,
       JSON.stringify(order),
     );
+    console.log(`ZADD orderbook:${symbol}:${side} ${order.price} '{"id":${order.id},"amount":${order.amount}}'`)
   }
 
   async removeOrder(

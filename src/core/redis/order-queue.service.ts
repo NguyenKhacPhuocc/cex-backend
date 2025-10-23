@@ -16,12 +16,15 @@ export class OrderQueueService {
   }
 
   async enqueue(symbol: string, order: Order): Promise<void> {
+    // console.log('enqueue symbol data:', symbol);
+    // console.log('enqueue order data:', order);
     await this.redis.lpush(this.getQueueKey(symbol), JSON.stringify(order));
-    this.logger.log(`Order ${order.id} pushed to queue ${symbol}`);
+    // console.log(`Order ${order.id} pushed to queue ${symbol}`);
   }
 
   async dequeue(symbol: string): Promise<Order | null> {
-    const result = await this.redis.brpop(this.getQueueKey(symbol), 0);
+    const result = await this.redis.brpop(this.getQueueKey(symbol), 1); // Timeout 1 second
+    console.log('dequeue result data:', result);
     if (!result) return null;
     const [, value] = result;
     return JSON.parse(value);

@@ -1,4 +1,3 @@
-/* eslint-disable prettier/prettier */
 // register.dto.ts
 import { IsEmail, IsString, MinLength } from 'class-validator';
 
