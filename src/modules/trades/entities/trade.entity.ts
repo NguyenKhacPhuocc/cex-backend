@@ -1,5 +1,6 @@
 import { Market } from 'src/modules/market/entities/market.entity';
 import { Order } from 'src/modules/order/entities/order.entity';
+import { User } from 'src/modules/users/entities/user.entity';
 import {
   Entity,
   PrimaryGeneratedColumn,
@@ -34,6 +35,14 @@ export class Trade {
 
   @Column('decimal', { precision: 20, scale: 8, default: 0 })
   fee: number;
+
+  @ManyToOne(() => User, { onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'buyer_id' })
+  buyer: User;
+
+  @ManyToOne(() => User, { onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'seller_id' })
+  seller: User;
 
   @CreateDateColumn()
   timestamp: Date;

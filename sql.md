@@ -163,3 +163,68 @@ id	    changeAmount	    balanceBefore	    balanceAfter	    referenceType	    ref
 → ledger_entries ghi rõ “tiền trong ví giảm 100”, trong khi transactions chỉ ghi “có một lệnh rút 100USDT đã hoàn tất”.
 
 
+
+
+
+
+
+người dùng bán 0.1btc với giá 100000usdt để lấy về usdt thì sẽ khóa 0.1btc của ví đó( ví spot - currency: btc)
+
+người dùng mua 0.1btc với giá 100000usdt để lấy về btc thì sẽ phải khóa 10000usdt trong ví (ví spot - currency: usdt)
+
+
+
+trade price = 64000 đặt lệnh mua/ bán với giá 64000
+trade value =  64000 * số lượng khớp 
+ví dụ với trường hợp
+1 người đặt lệnh mua 0.1 btc với giá 64000 usdt tự khóa ví spot 6400usdt và 1 người đặt lệnh bán 0.1btc với giá 64000usdt tự khóa ví spot 0.1btc thì khi đó trade value sẽ là 6400usdt tức là đây là số tiền mà thằng mua sẽ phải bỏ ra để mua 0.1 btc từ người bán 
+
+
+
+makerOrder: Order, // người đặt lệnh trước
+{
+    "userId": "25ff4944-b268-498a-a3e2-d95f9e06e1f6",
+    "id": "cb485881-a8c5-4133-9ba9-f1a49d8dbf98",
+    "market": {
+        "id": "1bf9c758-b916-46e9-85eb-a97439793366",
+        "symbol": "BTCUSDT",
+        "baseAsset": "BTC",
+        "quoteAsset": "USDT",
+        "status": "active",
+        "minOrderSize": "0.00010000",
+        "pricePrecision": 2,
+        "createdAt": "2025-10-22T04:48:29.654Z"
+    },
+    "side": "buy",
+    "type": "limit",
+    "price": 63000,
+    "amount": 0.01,
+    "filled": "0.00000000",
+    "status": "open",
+    "createdAt": "2025-10-23T10:28:27.376Z",
+    "updatedAt": "2025-10-23T10:28:27.376Z"
+}
+
+takerOrder: Order, // người đặt lệnh sau
+{
+    "userId": "25ff4944-b268-498a-a3e2-d95f9e06e1f6",
+    "id": "001eff0d-108f-4bb8-9b9b-32a19dc7945a",
+    "market": {
+        "id": "1bf9c758-b916-46e9-85eb-a97439793366",
+        "symbol": "BTCUSDT",
+        "baseAsset": "BTC",
+        "quoteAsset": "USDT",
+        "status": "active",
+        "minOrderSize": "0.00010000",
+        "pricePrecision": 2,
+        "createdAt": "2025-10-22T04:48:29.654Z"
+    },
+    "side": "sell",
+    "type": "limit",
+    "price": 63000,
+    "amount": 0.01,
+    "filled": "0.00000000",
+    "status": "open",
+    "createdAt": "2025-10-23T10:29:09.443Z",
+    "updatedAt": "2025-10-23T10:29:09.443Z"
+}
