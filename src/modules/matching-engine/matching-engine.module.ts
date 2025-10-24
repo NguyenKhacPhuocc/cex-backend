@@ -12,16 +12,31 @@ import { TradesModule } from 'src/modules/trades/trades.module';
 import { UsersModule } from 'src/modules/users/users.module';
 import { MarketModule } from 'src/modules/market/market.module';
 import { TradingModule } from '../trading/trading.module';
+import { Transaction } from '../transactions/entities/transaction.entity';
+import { LedgerEntry } from '../ledger/entities/ledger.entity';
+import { TransactionsModule } from '../transactions/transactions.module';
+import { LedgerModule } from '../ledger/ledger.module';
 
 @Module({
   imports: [
     forwardRef(() => TradingModule),
-    TypeOrmModule.forFeature([Order, Wallet, Trade, User, Market]),
+    TypeOrmModule.forFeature([
+      Order,
+      Wallet,
+      Trade,
+      User,
+      Market,
+      Transaction,
+      LedgerEntry,
+    ]),
     OrderModule,
     WalletsModule,
     TradesModule,
     UsersModule,
     MarketModule,
+    forwardRef(() => TradingModule),
+    TransactionsModule,
+    LedgerModule,
   ],
   providers: [MatchingEngineService],
   exports: [MatchingEngineService],

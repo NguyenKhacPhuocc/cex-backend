@@ -12,7 +12,8 @@ import { Wallet } from '../../wallets/entities/wallet.entity';
 export enum LedgerReferenceType {
   DEPOSIT = 'deposit',
   WITHDRAW = 'withdraw',
-  TRADE = 'trade',
+  TRADE_SELL = 'trade_sell',
+  TRADE_BUY = 'trade_buy',
   TRANSFER = 'transfer',
   FEE = 'fee',
 }

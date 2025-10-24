@@ -8,6 +8,15 @@ import { User } from 'src/modules/users/entities/user.entity';
 import { Market } from 'src/modules/market/entities/market.entity';
 import { Wallet, WalletType } from '../wallets/entities/wallet.entity';
 import { Trade } from '../trades/entities/trade.entity';
+import {
+  Transaction,
+  TransactionType,
+  TransactionStatus,
+} from '../transactions/entities/transaction.entity';
+import {
+  LedgerEntry,
+  LedgerReferenceType,
+} from '../ledger/entities/ledger.entity';
 
 @Injectable()
 export class MatchingEngineService {
@@ -25,6 +34,10 @@ export class MatchingEngineService {
     private walletRepo: Repository<Wallet>,
     @InjectRepository(Trade)
     private tradeRepo: Repository<Trade>,
+    @InjectRepository(Transaction)
+    private transactionRepo: Repository<Transaction>,
+    @InjectRepository(LedgerEntry)
+    private ledgerRepo: Repository<LedgerEntry>,
   ) {}
 
   async processOrder(order: Order): Promise<void> {
@@ -379,5 +392,87 @@ export class MatchingEngineService {
     ]);
 
     this.logger.log(`Wallets updated for trade ${trade.id}`);
+
+    // --- Lưu bản ghi vào transactions ---
+    const buyerTransaction = this.transactionRepo.create({
+      user: buyerUser,
+      wallet: buyerBaseWallet,
+      type: TransactionType.TRADE_BUY,
+      amount: matchedAmount,
+      currency: market.baseAsset,
+      status: TransactionStatus.COMPLETED,
+      createdAt: new Date(),
+    });
+    const sellerTransaction = this.transactionRepo.create({
+      user: sellerUser,
+      wallet: sellerQuoteWallet,
+      type: TransactionType.TRADE_SELL,
+      amount: tradeValue,
+      currency: market.quoteAsset,
+      status: TransactionStatus.COMPLETED,
+      createdAt: new Date(),
+    });
+    await this.transactionRepo.save([buyerTransaction, sellerTransaction]);
+
+    // --- Lưu bản ghi vào ledger_entries ---
+    const ledgerEntries: LedgerEntry[] = [
+      // Buyer: giảm frozen quote
+      this.ledgerRepo.create({
+        user: { id: buyerUser.id },
+        wallet: { id: buyerQuoteWallet.id },
+        currency: market.quoteAsset,
+        changeAmount: -tradeValue,
+        balanceBefore: Number(buyerQuoteWallet.balance) + tradeValue,
+        balanceAfter: Number(buyerQuoteWallet.balance),
+        referenceType: LedgerReferenceType.TRADE_BUY,
+        referenceId: String(trade.id),
+        description: `Decrease frozen for buy order ${takerOrder.id}`,
+        createdAt: new Date(),
+      }),
+      // Buyer: tăng available base
+      this.ledgerRepo.create({
+        user: { id: buyerUser.id },
+        wallet: { id: buyerBaseWallet.id },
+        currency: market.baseAsset,
+        changeAmount: matchedAmount,
+        balanceBefore: Number(buyerBaseWallet.balance) - matchedAmount,
+        balanceAfter: Number(buyerBaseWallet.balance),
+        referenceType: LedgerReferenceType.TRADE_BUY,
+        referenceId: String(trade.id),
+        description: `Increase available for buy order ${takerOrder.id}`,
+        createdAt: new Date(),
+      }),
+      // Seller: giảm frozen base
+      this.ledgerRepo.create({
+        user: { id: sellerUser.id },
+        wallet: { id: sellerBaseWallet.id },
+        currency: market.baseAsset,
+        changeAmount: -matchedAmount,
+        balanceBefore: Number(sellerBaseWallet.balance) + matchedAmount,
+        balanceAfter: Number(sellerBaseWallet.balance),
+        referenceType: LedgerReferenceType.TRADE_SELL,
+        referenceId: String(trade.id),
+        description: `Decrease frozen for sell order ${makerOrder.id}`,
+        createdAt: new Date(),
+      }),
+      // Seller: tăng available quote
+      this.ledgerRepo.create({
+        user: { id: sellerUser.id },
+        wallet: { id: sellerQuoteWallet.id },
+        currency: market.quoteAsset,
+        changeAmount: tradeValue,
+        balanceBefore: Number(sellerQuoteWallet.balance) - tradeValue,
+        balanceAfter: Number(sellerQuoteWallet.balance),
+        referenceType: LedgerReferenceType.TRADE_SELL,
+        referenceId: String(trade.id),
+        description: `Increase available for sell order ${makerOrder.id}`,
+        createdAt: new Date(),
+      }),
+    ];
+    await this.ledgerRepo.save(ledgerEntries);
+
+    this.logger.log(
+      `Transactions and ledger entries saved for trade ${trade.id}`,
+    );
   }
 }

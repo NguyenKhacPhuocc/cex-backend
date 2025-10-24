@@ -13,7 +13,8 @@ export enum TransactionType {
   DEPOSIT = 'deposit',
   WITHDRAW = 'withdraw',
   TRANSFER = 'transfer',
-  TRADE = 'trade',
+  TRADE_SELL = 'trade_sell',
+  TRADE_BUY = 'trade_buy',
   FEE = 'fee',
 }
 
