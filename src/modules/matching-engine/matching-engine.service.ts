@@ -1,4 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { RedisService } from 'src/core/redis/redis.service';
+import { RedisPubSub } from 'src/core/redis/redis.pubsub';
+import { REDIS_KEYS } from 'src/common/constants/redis-keys';
 import { Order } from 'src/modules/order/entities/order.entity';
 import { OrderSide, OrderStatus, OrderType } from 'src/shared/enums';
 import { OrderBookService } from '../trading/order-book.service';
@@ -24,6 +27,8 @@ export class MatchingEngineService {
 
   constructor(
     private readonly orderBookService: OrderBookService,
+    private readonly redisService: RedisService,
+    private readonly redisPubSub: RedisPubSub,
     @InjectRepository(Order)
     private orderRepo: Repository<Order>,
     @InjectRepository(User)
@@ -96,7 +101,16 @@ export class MatchingEngineService {
 
     await this.orderRepo.save(newOrderEntity);
     this.logger.log(
-      `Order ${newOrderEntity.id} saved to DB with status ${newOrderEntity.status}`,
+      `[MatchingEngineService] Order ${newOrderEntity.id} saved to DB with status ${newOrderEntity.status}. User ID: ${order.user.id}`,
+    );
+
+    // Publish message to invalidate cache for the user of the processed order
+    const takerUserId = order.user.id;
+    await this.redisPubSub.publish(REDIS_KEYS.ORDER_UPDATE_CHANNEL, {
+      userId: takerUserId,
+    });
+    this.logger.log(
+      `[MatchingEngineService] Published cache invalidation message for taker user ${takerUserId} for order ${newOrderEntity.id}`,
     );
   }
 
@@ -155,6 +169,11 @@ export class MatchingEngineService {
         bestMatch.status = OrderStatus.FILLED;
       }
       await this.orderRepo.save(bestMatch);
+
+      // Publish message to invalidate cache for the maker user
+      await this.redisPubSub.publish(REDIS_KEYS.ORDER_UPDATE_CHANNEL, {
+        userId: bestMatch.user.id,
+      });
     }
 
     if (Number(remainingAmount) > 0) {
@@ -212,6 +231,11 @@ export class MatchingEngineService {
         bestMatch.status = OrderStatus.FILLED;
       }
       await this.orderRepo.save(bestMatch);
+
+      // Publish message to invalidate cache for the maker user
+      await this.redisPubSub.publish(REDIS_KEYS.ORDER_UPDATE_CHANNEL, {
+        userId: bestMatch.user.id,
+      });
     }
     return Number(remainingAmount);
   }

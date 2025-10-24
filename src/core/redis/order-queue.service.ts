@@ -24,7 +24,7 @@ export class OrderQueueService {
 
   async dequeue(symbol: string): Promise<Order | null> {
     const result = await this.redis.brpop(this.getQueueKey(symbol), 1); // Timeout 1 second
-    console.log('dequeue result data:', result);
+    // console.log('dequeue result data:', result);
     if (!result) return null;
     const [, value] = result;
     return JSON.parse(value);

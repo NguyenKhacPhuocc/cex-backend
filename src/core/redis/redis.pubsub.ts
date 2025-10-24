@@ -50,17 +50,17 @@ export class RedisPubSub {
   onMessage(callback: (channel: string, message: any) => void) {
     this.subClient.on('message', (channel, message) => {
       try {
-        // 1. Log tin nhắn thô nhận được
-        this.logger.debug(`Received message on channel: ${channel}`);
-
-        // 2. Parse payload và kiểm tra lỗi
+        this.logger.debug(
+          `[RedisPubSub] Received raw message on channel: ${channel}, message: ${message}`,
+        );
         const parsedMessage = JSON.parse(message);
-
-        // 3. Gọi callback với object đã parse
+        this.logger.debug(
+          `[RedisPubSub] Parsed message: ${JSON.stringify(parsedMessage)}`,
+        );
         callback(channel, parsedMessage);
       } catch (error) {
         this.logger.error(
-          `Error parsing JSON message on channel ${channel}: ${message}`,
+          `[RedisPubSub] Error parsing JSON message on channel ${channel}: ${message}`,
           error.stack,
         );
       }

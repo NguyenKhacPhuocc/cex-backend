@@ -24,7 +24,6 @@ export class OrderQueueConsumerService implements OnModuleInit {
     this.logger.log(`Starting to listen for orders on queue: ${symbol}`);
     while (true) {
       try {
-        console.log(`Waiting for orders on queue: ${symbol}`);
         const order = await this.orderQueue.dequeue(symbol);
         if (order) {
           this.logger.log(`Dequeued order ${order.id} from queue ${symbol}`);
