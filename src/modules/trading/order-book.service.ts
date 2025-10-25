@@ -15,31 +15,52 @@ export class OrderBookService {
     return `orderbook:${symbol}:${side}`;
   }
 
+  private getOrderHashKey(symbol: string): string {
+    return `orders:${symbol}`;
+  }
+
   async add(order: Order): Promise<void> {
-    const key = this.getBookKey(order.market.symbol, order.side);
+    const bookKey = this.getBookKey(order.market.symbol, order.side);
     const score = order.side === OrderSide.BUY ? -order.price : order.price;
-    const value = JSON.stringify(order);
-    await this.redis.zadd(key, score, value);
-    this.logger.log(`Added order ${order.id} to order book ${key} with status ${order.status}`);
+    
+    // Store the full order in a hash
+    const hashKey = this.getOrderHashKey(order.market.symbol);
+    await this.redis.hset(hashKey, order.id, JSON.stringify(order));
+
+    // Store only the order ID in the sorted set
+    await this.redis.zadd(bookKey, score, order.id);
+
+    this.logger.log(`Added order ${order.id} to order book ${bookKey}`);
   }
 
   async getBest(
     symbol: string,
     side: OrderSide,
   ): Promise<Order | null> {
-    const key = this.getBookKey(symbol, side);
-    const range =
-      side === OrderSide.BUY
-        ? await this.redis.zrange(key, 0, 0)
-        : await this.redis.zrange(key, 0, 0);
+    const bookKey = this.getBookKey(symbol, side);
+    const range = await this.redis.zrange(bookKey, 0, 0);
+
     if (!range.length) return null;
-    return JSON.parse(range[0]);
+
+    const orderId = range[0];
+    const hashKey = this.getOrderHashKey(symbol);
+    const orderData = await this.redis.hget(hashKey, orderId);
+
+    if (!orderData) return null;
+
+    return JSON.parse(orderData);
   }
 
   async remove(order: Order): Promise<void> {
-    const key = this.getBookKey(order.market.symbol, order.side);
-    const value = JSON.stringify(order);
-    await this.redis.zrem(key, value);
-    this.logger.log(`Removed order ${order.id} from order book ${key}`);
+    const bookKey = this.getBookKey(order.market.symbol, order.side);
+    const hashKey = this.getOrderHashKey(order.market.symbol);
+
+    // Remove the order ID from the sorted set
+    await this.redis.zrem(bookKey, order.id);
+
+    // Remove the order data from the hash
+    await this.redis.hdel(hashKey, order.id);
+
+    this.logger.log(`Removed order ${order.id} from order book ${bookKey}`);
   }
 }

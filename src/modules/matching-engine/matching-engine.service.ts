@@ -1,4 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+/* eslint-disable @typescript-eslint/no-unsafe-argument */
+/* eslint-disable @typescript-eslint/no-floating-promises */
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { RedisService } from 'src/core/redis/redis.service';
 import { RedisPubSub } from 'src/core/redis/redis.pubsub';
 import { REDIS_KEYS } from 'src/common/constants/redis-keys';
@@ -22,7 +24,7 @@ import {
 } from '../ledger/entities/ledger.entity';
 
 @Injectable()
-export class MatchingEngineService {
+export class MatchingEngineService implements OnModuleInit {
   private readonly logger = new Logger(MatchingEngineService.name);
 
   constructor(
@@ -44,6 +46,20 @@ export class MatchingEngineService {
     @InjectRepository(LedgerEntry)
     private ledgerRepo: Repository<LedgerEntry>,
   ) {}
+
+  onModuleInit() {
+    this.redisPubSub.subscribe(REDIS_KEYS.ORDER_CANCEL_CHANNEL);
+    this.redisPubSub.onMessage((channel, message) => {
+      if (channel === REDIS_KEYS.ORDER_CANCEL_CHANNEL) {
+        this.handleCancelOrder(message);
+      }
+    });
+  }
+
+  async handleCancelOrder(order: Order) {
+    this.logger.log(`Canceling order: ${order.id}`);
+    await this.orderBookService.remove(order);
+  }
 
   async processOrder(order: Order): Promise<void> {
     this.logger.log(`Processing order: ${order.id}`);

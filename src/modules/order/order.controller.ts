@@ -1,4 +1,4 @@
-import { Controller, UseGuards, Post, Body, Get } from '@nestjs/common';
+import { Controller, UseGuards, Post, Body, Get, Param } from '@nestjs/common';
 import { User, UserRole } from '../users/entities/user.entity';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { GetUser } from 'src/common/decorators/get-user.decorator';
@@ -24,7 +24,6 @@ export class OrderController {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { user: _, ...result } = order;
     return {
-      // userId: order.user.id,
       ...result,
     };
   }
@@ -43,5 +42,30 @@ export class OrderController {
   async getUserOrderHistory(@GetUser() user: User): Promise<Order[]> {
     const orders = await this.orderService.getUserOrderHistory(user);
     return orders;
+  }
+
+  // lấy chi tiết một lệnh theo id
+  @Get(':id')
+  @Roles(UserRole.USER)
+  async getOrderById(
+    @GetUser() user: User,
+    @Param('id') id: string,
+  ): Promise<Order> {
+    const order = await this.orderService.getOrderById(user, id);
+    return order;
+  }
+
+  // hủy một lệnh theo id
+  @Post(':id/cancel')
+  @Roles(UserRole.USER)
+  async cancelOrder(@GetUser() user: User, @Param('id') id: string) {
+    return await this.orderService.cancelOrder(user, id);
+  }
+
+  // hủy tất cả lệnh đang mở của user, Hủy toàn bộ lệnh đang mở theo cặp hoặc toàn bộ, Gỡ toàn bộ Redis key orderbook:{symbol}:buy/sell của user và cập nhật DB.
+  @Post('cancel-all')
+  @Roles(UserRole.USER)
+  async cancelAllOrders(@GetUser() user: User) {
+    return await this.orderService.cancelAllOrders(user);
   }
 }

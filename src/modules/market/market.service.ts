@@ -21,7 +21,12 @@ export class MarketService {
     });
   }
   async create(createMarketDto: CreateMarketDto): Promise<Market> {
-    const { symbol } = createMarketDto;
+    const { baseAsset, quoteAsset } = createMarketDto;
+
+    const upperBaseAsset = baseAsset.toUpperCase();
+    const upperQuoteAsset = quoteAsset.toUpperCase();
+    const symbol = `${upperBaseAsset}${upperQuoteAsset}`;
+
     const existingMarket = await this.marketRepository.findOne({
       where: { symbol },
     });
@@ -32,7 +37,14 @@ export class MarketService {
       );
     }
 
-    const newMarket = this.marketRepository.create(createMarketDto);
+    const newMarketData = {
+      ...createMarketDto,
+      baseAsset: upperBaseAsset,
+      quoteAsset: upperQuoteAsset,
+      symbol,
+    };
+
+    const newMarket = this.marketRepository.create(newMarketData);
     return this.marketRepository.save(newMarket);
   }
 }

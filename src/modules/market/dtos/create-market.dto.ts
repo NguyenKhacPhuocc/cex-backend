@@ -9,10 +9,6 @@ import {
 export class CreateMarketDto {
   @IsString()
   @IsNotEmpty()
-  symbol: string;
-
-  @IsString()
-  @IsNotEmpty()
   baseAsset: string;
 
   @IsString()

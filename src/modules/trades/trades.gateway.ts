@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-call */
 import { WebSocketGateway } from '@nestjs/websockets';
 import { TradesService } from './trades.service';
 

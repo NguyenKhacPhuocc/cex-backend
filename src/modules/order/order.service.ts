@@ -17,7 +17,7 @@ import { User } from '../users/entities/user.entity';
 import { MarketService } from '../market/market.service';
 import { CreateOrderDto } from './dtos/create-order.dto';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Not, Repository } from 'typeorm';
+import { DataSource, Not, Repository } from 'typeorm';
 import { OrderBookCacheService } from 'src/core/redis/orderbook-cache.service';
 import { Wallet, WalletType } from '../wallets/entities/wallet.entity';
 import { OrderQueueService } from 'src/core/redis/order-queue.service';
@@ -35,6 +35,7 @@ export class OrderService implements OnModuleInit {
     private readonly orderQueue: OrderQueueService,
     private readonly redisService: RedisService,
     private readonly redisPubSub: RedisPubSub,
+    private dataSource: DataSource,
     @InjectRepository(Order)
     private orderRepo: Repository<Order>,
     @InjectRepository(Wallet)
@@ -126,7 +127,6 @@ export class OrderService implements OnModuleInit {
     }
   }
 
-  // lấy các lệnh đang mở của user, Lấy tất cả lệnh đang mở của user Lọc status = open từ Redis trước, fallback DB.
   async getUserOrdersIsOpen(user: User): Promise<Order[]> {
     const redisKey = REDIS_KEYS.USER_OPEN_ORDERS(user.id);
     const cachedOrders = await this.redisService.get(redisKey);
@@ -173,5 +173,141 @@ export class OrderService implements OnModuleInit {
       order: { createdAt: 'DESC' },
     });
     return orders;
+  }
+
+  async getOrderById(user: User, orderId: string): Promise<Order> {
+    const order = await this.orderRepo.findOne({
+      where: {
+        id: orderId,
+        user: { id: user.id },
+      },
+      relations: ['market'], // nếu muốn lấy thêm thông tin market
+    });
+    if (!order) {
+      throw new NotFoundException(`Order with id ${orderId} not found`);
+    }
+    return order;
+  }
+
+  async cancelOrder(user: User, orderId: string) {
+    const order = await this.getOrderById(user, orderId);
+
+    if (order.status !== OrderStatus.OPEN) {
+      throw new BadRequestException(
+        `Cannot cancel order with status ${order.status}`,
+      );
+    }
+
+    // Gửi tín hiệu đến matching engine để xóa khỏi orderbook
+    await this.redisPubSub.publish(REDIS_KEYS.ORDER_CANCEL_CHANNEL, order);
+
+    // Transaction đảm bảo đồng bộ
+    await this.dataSource.transaction(async (manager) => {
+      order.status = OrderStatus.CANCELED;
+      await manager.save(order);
+
+      const remainingAmount = order.amount - order.filled;
+      const amountToUnlock =
+        order.side === OrderSide.BUY
+          ? order.price * remainingAmount
+          : remainingAmount;
+
+      const currencyToUnlock =
+        order.side === OrderSide.BUY
+          ? order.market.quoteAsset
+          : order.market.baseAsset;
+
+      const wallet = await manager.findOne(Wallet, {
+        where: {
+          user: { id: user.id },
+          currency: currencyToUnlock,
+          walletType: WalletType.SPOT,
+        },
+      });
+
+      if (wallet) {
+        wallet.available = Number(wallet.available) + amountToUnlock;
+        wallet.frozen = Number(wallet.frozen) - amountToUnlock;
+        await manager.save(wallet);
+      }
+    });
+
+    // Thông báo cập nhật UI
+    await this.redisPubSub.publish(REDIS_KEYS.ORDER_UPDATE_CHANNEL, {
+      userId: user.id,
+    });
+
+    return {
+      code: 'success',
+      message: `Order ${orderId} canceled successfully.`,
+    };
+  }
+
+  async cancelAllOrders(user: User) {
+    const openOrders = await this.orderRepo.find({
+      where: {
+        user: { id: user.id },
+        status: OrderStatus.OPEN,
+      },
+      relations: ['market'],
+    });
+
+    if (openOrders.length === 0) {
+      return { code: 'success', message: 'No open orders to cancel.' };
+    }
+
+    await this.dataSource.transaction(async (manager) => {
+      const amountsToUnlock = new Map<string, number>();
+
+      for (const order of openOrders) {
+        await this.redisPubSub.publish(REDIS_KEYS.ORDER_CANCEL_CHANNEL, order);
+        order.status = OrderStatus.CANCELED;
+
+        const remainingAmount = order.amount - order.filled;
+        if (remainingAmount <= 0) continue;
+
+        const amount =
+          order.side === OrderSide.BUY
+            ? (order.price || 0) * remainingAmount
+            : remainingAmount;
+        const currency =
+          order.side === OrderSide.BUY
+            ? order.market.quoteAsset
+            : order.market.baseAsset;
+
+        amountsToUnlock.set(
+          currency,
+          (amountsToUnlock.get(currency) || 0) + amount,
+        );
+      }
+
+      for (const [currency, amount] of amountsToUnlock.entries()) {
+        if (amount <= 0) continue;
+        const wallet = await manager.findOne(Wallet, {
+          where: {
+            user: { id: user.id },
+            currency,
+            walletType: WalletType.SPOT,
+          },
+        });
+
+        if (wallet) {
+          wallet.available = Number(wallet.available) + amount;
+          wallet.frozen = Number(wallet.frozen) - amount;
+          await manager.save(wallet);
+        }
+      }
+
+      await manager.save(openOrders);
+    });
+
+    await this.redisPubSub.publish(REDIS_KEYS.ORDER_UPDATE_CHANNEL, {
+      userId: user.id,
+    });
+
+    return {
+      code: 'success',
+      message: `All ${openOrders.length} open orders canceled successfully.`,
+    };
   }
 }

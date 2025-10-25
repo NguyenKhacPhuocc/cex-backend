@@ -77,6 +77,10 @@ export class RedisService {
     return this.client.hgetall(key);
   }
 
+  async hdel(key: string, ...fields: string[]): Promise<number> {
+    return this.client.hdel(key, ...fields);
+  }
+
   // --- Pub/Sub (đã có file riêng, nhưng bạn vẫn có thể dùng tạm ở đây)
   async publish(channel: string, message: string): Promise<number> {
     return this.client.publish(channel, message);
