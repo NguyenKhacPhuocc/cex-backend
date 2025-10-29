@@ -4,15 +4,29 @@ import { ConfigService } from '@nestjs/config';
 import { env } from 'process';
 import { DataSource } from 'typeorm';
 import { ValidationPipe } from '@nestjs/common';
+import { ThrottlerExceptionFilter } from './common/filters/throttler-exception.filter';
+import cookieParser from 'cookie-parser';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
-  // Enable CORS
-  app.enableCors({ origin: '*' });
+  // Enable cookie parser - QUAN TRỌNG để đọc/set cookies!
+  app.use(cookieParser());
+
+  // Enable CORS với cấu hình đầy đủ
+  app.enableCors({
+    origin: process.env.FRONTEND_URL, // Frontend URLs
+    credentials: true, // Cho phép gửi cookies
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    exposedHeaders: ['Set-Cookie'],
+  });
 
   // Use global validation pipe
   app.useGlobalPipes(new ValidationPipe());
+
+  // Apply custom throttler exception filter for friendly error messages
+  app.useGlobalFilters(new ThrottlerExceptionFilter());
 
   // tất cả route có tiền tố /api
   app.setGlobalPrefix('api');

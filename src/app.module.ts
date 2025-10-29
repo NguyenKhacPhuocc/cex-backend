@@ -15,11 +15,26 @@ import { AdminModule } from './modules/admin/admin.module';
 import { OrderModule } from './modules/order/order.module';
 import { TradingModule } from './modules/trading/trading.module';
 import { MatchingEngineModule } from './modules/matching-engine/matching-engine.module';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { APP_GUARD } from '@nestjs/core';
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true, // Cho phép sử dụng ConfigService ở mọi nơi
     }),
+    // Rate Limiting - Global configuration
+    ThrottlerModule.forRoot([
+      {
+        name: 'default',
+        ttl: 60000, // 60 seconds
+        limit: 100, // 100 requests per minute (global default)
+      },
+      {
+        name: 'auth',
+        ttl: 60000, // 60 seconds
+        limit: 5, // 5 requests per minute for auth endpoints
+      },
+    ]),
     CacheModule.registerAsync({
       isGlobal: true,
       useClass: RedisConfigFactory,
@@ -37,6 +52,13 @@ import { MatchingEngineModule } from './modules/matching-engine/matching-engine.
     MatchingEngineModule,
   ],
   controllers: [AppController],
-  providers: [AppService],
+  providers: [
+    AppService,
+    // Apply throttler globally
+    {
+      provide: APP_GUARD,
+      useClass: ThrottlerGuard,
+    },
+  ],
 })
 export class AppModule {}

@@ -25,7 +25,7 @@ export class MarketService {
 
     const upperBaseAsset = baseAsset.toUpperCase();
     const upperQuoteAsset = quoteAsset.toUpperCase();
-    const symbol = `${upperBaseAsset}${upperQuoteAsset}`;
+    const symbol = `${upperBaseAsset}_${upperQuoteAsset}`;
 
     const existingMarket = await this.marketRepository.findOne({
       where: { symbol },

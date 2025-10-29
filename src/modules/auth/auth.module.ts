@@ -10,8 +10,8 @@ import { WalletsModule } from '../wallets/wallets.module';
   imports: [
     UsersModule,
     JwtModule.register({
-      secret: process.env.JWT_SECRET || 'secret123',
-      signOptions: { expiresIn: '7d' },
+      secret: process.env.JWT_ACCESS_SECRET,
+      signOptions: { expiresIn: '1h' }, // Khớp với accessToken expiry
     }),
     WalletsModule,
   ],
