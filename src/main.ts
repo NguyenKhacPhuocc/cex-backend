@@ -5,6 +5,7 @@ import { env } from 'process';
 import { DataSource } from 'typeorm';
 import { ValidationPipe } from '@nestjs/common';
 import { ThrottlerExceptionFilter } from './common/filters/throttler-exception.filter';
+import { ExcludePasswordInterceptor } from './common/interceptors/exclude-password.interceptor';
 import cookieParser from 'cookie-parser';
 
 async function bootstrap() {
@@ -27,6 +28,9 @@ async function bootstrap() {
 
   // Apply custom throttler exception filter for friendly error messages
   app.useGlobalFilters(new ThrottlerExceptionFilter());
+
+  // 🔐 SECURITY: Tự động loại bỏ password/passwordHash khỏi mọi responses
+  app.useGlobalInterceptors(new ExcludePasswordInterceptor());
 
   // tất cả route có tiền tố /api
   app.setGlobalPrefix('api');

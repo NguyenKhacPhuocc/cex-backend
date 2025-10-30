@@ -16,25 +16,18 @@ import { Transaction } from '../transactions/entities/transaction.entity';
 import { LedgerEntry } from '../ledger/entities/ledger.entity';
 import { TransactionsModule } from '../transactions/transactions.module';
 import { LedgerModule } from '../ledger/ledger.module';
+import { WebSocketModule } from 'src/core/websocket/websocket.module';
 
 @Module({
   imports: [
     forwardRef(() => TradingModule),
-    TypeOrmModule.forFeature([
-      Order,
-      Wallet,
-      Trade,
-      User,
-      Market,
-      Transaction,
-      LedgerEntry,
-    ]),
+    forwardRef(() => WebSocketModule), // Use forwardRef to avoid circular dependency
+    TypeOrmModule.forFeature([Order, Wallet, Trade, User, Market, Transaction, LedgerEntry]),
     OrderModule,
     WalletsModule,
     TradesModule,
     UsersModule,
     MarketModule,
-    forwardRef(() => TradingModule),
     TransactionsModule,
     LedgerModule,
   ],

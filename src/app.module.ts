@@ -4,6 +4,7 @@ import { AppService } from './app.service';
 import { ConfigModule } from '@nestjs/config';
 import { DatabaseModule } from './core/database/database.module';
 import { RedisModule } from './core/redis/redis.module';
+import { WebSocketModule } from './core/websocket/websocket.module';
 import { CacheModule } from '@nestjs/cache-manager';
 import { RedisConfigFactory } from './core/redis/redis-config.factory';
 import { AuthModule } from './modules/auth/auth.module';
@@ -15,8 +16,9 @@ import { AdminModule } from './modules/admin/admin.module';
 import { OrderModule } from './modules/order/order.module';
 import { TradingModule } from './modules/trading/trading.module';
 import { MatchingEngineModule } from './modules/matching-engine/matching-engine.module';
-import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { ThrottlerModule } from '@nestjs/throttler';
 import { APP_GUARD } from '@nestjs/core';
+import { CustomThrottlerGuard } from './common/guards/custom-throttler.guard';
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -27,7 +29,7 @@ import { APP_GUARD } from '@nestjs/core';
       {
         name: 'default',
         ttl: 60000, // 60 seconds
-        limit: 100, // 100 requests per minute (global default)
+        limit: 500, // 500 requests per minute (increased for real-time updates)
       },
       {
         name: 'auth',
@@ -41,6 +43,7 @@ import { APP_GUARD } from '@nestjs/core';
     }),
     DatabaseModule,
     RedisModule,
+    WebSocketModule,
     AuthModule,
     UsersModule,
     WalletsModule,
@@ -54,10 +57,10 @@ import { APP_GUARD } from '@nestjs/core';
   controllers: [AppController],
   providers: [
     AppService,
-    // Apply throttler globally
+    // Apply custom throttler globally with smart skipping for balance endpoints
     {
       provide: APP_GUARD,
-      useClass: ThrottlerGuard,
+      useClass: CustomThrottlerGuard,
     },
   ],
 })

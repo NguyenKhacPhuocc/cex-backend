@@ -19,7 +19,7 @@ export class UserService implements OnModuleInit {
         role: UserRole.ADMIN,
       });
       await this.repo.save(adminUser);
-      console.log('Default admin user created: admin@admin.com');
+      //   console.log('Default admin user created: admin@admin.com');
     }
   }
 

@@ -8,7 +8,7 @@ import { OrderService } from './order.service';
 import { CreateOrderDto } from './dtos/create-order.dto';
 import { Order } from './entities/order.entity';
 
-@Controller('order')
+@Controller('orders')
 @UseGuards(JwtAuthGuard, RolesGuard)
 export class OrderController {
   constructor(private readonly orderService: OrderService) {}
@@ -16,10 +16,7 @@ export class OrderController {
   // đặt lệnh spot buy/sell
   @Post()
   @Roles(UserRole.USER)
-  async createOrder(
-    @GetUser() user: User,
-    @Body() createOrderDto: CreateOrderDto,
-  ) {
+  async createOrder(@GetUser() user: User, @Body() createOrderDto: CreateOrderDto) {
     const order = await this.orderService.createOrder(user, createOrderDto);
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { user: _, ...result } = order;
@@ -47,10 +44,7 @@ export class OrderController {
   // lấy chi tiết một lệnh theo id
   @Get(':id')
   @Roles(UserRole.USER)
-  async getOrderById(
-    @GetUser() user: User,
-    @Param('id') id: string,
-  ): Promise<Order> {
+  async getOrderById(@GetUser() user: User, @Param('id') id: string): Promise<Order> {
     const order = await this.orderService.getOrderById(user, id);
     return order;
   }

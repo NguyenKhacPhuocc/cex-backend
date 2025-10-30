@@ -28,11 +28,13 @@ export class TradesService {
         id: trade.id,
         market: trade.market.symbol,
         side: isBuyer ? 'BUY' : 'SELL',
-        price: trade.price,
-        amount: trade.amount,
+        price: Number(trade.price), // Convert decimal string to number
+        amount: Number(trade.amount), // Convert decimal string to number
         total: total.toFixed(8), // Using 8 decimal places for precision
-        fee: trade.fee,
-        timestamp: trade.timestamp,
+        fee: Number(trade.fee), // Convert decimal string to number
+        timestamp: trade.timestamp
+          ? new Date(trade.timestamp).toISOString()
+          : new Date().toISOString(),
         counterparty: {
           id: isBuyer ? String(trade.seller.id) : String(trade.buyer.id),
           type: isBuyer ? 'SELLER' : 'BUYER',
@@ -42,10 +44,7 @@ export class TradesService {
     });
   }
 
-  async getUserTradeBySymbol(
-    user: User,
-    symbol: string,
-  ): Promise<TradeHistoryDto[]> {
+  async getUserTradeBySymbol(user: User, symbol: string): Promise<TradeHistoryDto[]> {
     const trades = await this.tradeRepository.find({
       where: [
         { buyer: { id: user.id }, market: { symbol: symbol.toUpperCase() } },
@@ -55,7 +54,12 @@ export class TradesService {
       order: { timestamp: 'DESC' },
     });
 
-    return trades.map((trade) => {
+    console.log(
+      `📊 [getUserTradeBySymbol] User ${user.id} trades for ${symbol}:`,
+      JSON.stringify(trades, null, 2),
+    );
+
+    const result = trades.map((trade) => {
       const isBuyer = trade.buyer.id === user.id;
       const total = Number(trade.price) * Number(trade.amount);
 
@@ -63,11 +67,13 @@ export class TradesService {
         id: trade.id,
         market: trade.market.symbol,
         side: isBuyer ? 'BUY' : 'SELL',
-        price: trade.price,
-        amount: trade.amount,
+        price: Number(trade.price), // Convert decimal string to number
+        amount: Number(trade.amount), // Convert decimal string to number
         total: total.toFixed(8),
-        fee: trade.fee,
-        timestamp: trade.timestamp,
+        fee: Number(trade.fee), // Convert decimal string to number
+        timestamp: trade.timestamp
+          ? new Date(trade.timestamp).toISOString()
+          : new Date().toISOString(),
         counterparty: {
           id: isBuyer ? String(trade.seller.id) : String(trade.buyer.id),
           type: isBuyer ? 'SELLER' : 'BUYER',
@@ -75,5 +81,58 @@ export class TradesService {
       };
       return dto;
     });
+
+    console.log(
+      `📤 [getUserTradeBySymbol] Formatted result for user ${user.id}:`,
+      JSON.stringify(result, null, 2),
+    );
+
+    return result;
+  }
+
+  /**
+   * Get recent market trades for a symbol (PUBLIC - no auth required)
+   * Returns last 50 trades
+   */
+  async getMarketTrades(
+    symbol: string,
+    limit = 50,
+  ): Promise<
+    {
+      id: number;
+      price: number;
+      amount: number;
+      total: string;
+      side: 'BUY' | 'SELL';
+      timestamp: string; // ISO 8601 string format
+    }[]
+  > {
+    const trades = await this.tradeRepository.find({
+      where: { market: { symbol: symbol.toUpperCase() } },
+      relations: ['market', 'buyer'],
+      order: { timestamp: 'DESC' },
+      take: limit,
+    });
+
+    console.log('📊 [getMarketTrades] Raw trades from DB:', JSON.stringify(trades, null, 2));
+    console.log('📊 [getMarketTrades] First trade timestamp:', trades[0]?.timestamp);
+
+    const result = trades.map((trade) => {
+      console.log(`🕐 Trade ${trade.id} timestamp:`, trade.timestamp, typeof trade.timestamp);
+      return {
+        id: trade.id,
+        price: Number(trade.price), // Convert decimal string to number
+        amount: Number(trade.amount), // Convert decimal string to number
+        total: (Number(trade.price) * Number(trade.amount)).toFixed(8),
+        side: 'BUY' as const, // We determine side by buyer (all trades are from buyer perspective in public view)
+        timestamp: trade.timestamp
+          ? new Date(trade.timestamp).toISOString()
+          : new Date().toISOString(),
+      };
+    });
+
+    console.log('📤 [getMarketTrades] Formatted result:', JSON.stringify(result, null, 2));
+
+    return result;
   }
 }

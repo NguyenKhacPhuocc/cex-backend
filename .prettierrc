@@ -1,8 +1,11 @@
 {
-  "typescript": true,
-  "semi": true,
-  "singleQuote": true,
-  "trailingComma": "all",
-  "endOfLine": "auto",
-  "bracketSpacing": true
+    "typescript": true,
+    "semi": true,
+    "singleQuote": true,
+    "trailingComma": "all",
+    "endOfLine": "auto",
+    "bracketSpacing": true,
+    "tabWidth": 2,
+    "useTabs": false,
+    "printWidth": 100
 }

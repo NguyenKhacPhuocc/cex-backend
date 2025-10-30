@@ -8,19 +8,26 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { TradeHistoryDto } from './dtos/trade-history.dto';
 
 @Controller('trades')
-@UseGuards(JwtAuthGuard, RolesGuard)
 export class TradesController {
   constructor(private readonly tradesService: TradesService) {}
 
-  // Lịch sử khớp lệnh cá nhân, Truy vấn trades theo user_id, dùng cho tab “Lịch sử giao dịch”.
+  // PUBLIC: Get recent market trades for a symbol (no auth required)
+  @Get('market/:symbol')
+  async getMarketTrades(@Param('symbol') symbol: string) {
+    return this.tradesService.getMarketTrades(symbol, 50);
+  }
+
+  // PRIVATE: Lịch sử khớp lệnh cá nhân
   @Get('history')
+  @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.USER)
   async getUserTrades(@GetUser() user: User): Promise<TradeHistoryDto[]> {
     return this.tradesService.getUserTrades(user);
   }
 
-  // Lịch sử khớp lệnh cá nhân theo cặp thị trường, Truy vấn trades theo user_id và symbol, dùng cho tab “Lịch sử giao dịch”.
+  // PRIVATE: Lịch sử khớp lệnh cá nhân theo cặp thị trường
   @Get('history/:symbol')
+  @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.USER)
   async getUserTradeBySymbol(
     @GetUser() user: User,

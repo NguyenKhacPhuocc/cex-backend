@@ -11,6 +11,6 @@ export class TradeHistoryDto {
   amount: number;
   total: string;
   fee: number;
-  timestamp: Date;
+  timestamp: string; // ISO 8601 string format
   counterparty: CounterpartyDto;
 }

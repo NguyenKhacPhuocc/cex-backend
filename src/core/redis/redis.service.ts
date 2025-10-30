@@ -9,14 +9,8 @@ export class RedisService {
   constructor(@Inject('REDIS_CLIENT') private readonly client: IORedis.Redis) {}
 
   // --- STRING (key-value)
-  async set(
-    key: string,
-    value: string,
-    ttlSeconds?: number,
-  ): Promise<string | null> {
-    return ttlSeconds
-      ? this.client.set(key, value, 'EX', ttlSeconds)
-      : this.client.set(key, value);
+  async set(key: string, value: string, ttlSeconds?: number): Promise<string | null> {
+    return ttlSeconds ? this.client.set(key, value, 'EX', ttlSeconds) : this.client.set(key, value);
   }
 
   async get(key: string): Promise<string | null> {
@@ -49,12 +43,7 @@ export class RedisService {
     return this.client.zadd(key, score, member);
   }
 
-  async zrange(
-    key: string,
-    start: number,
-    stop: number,
-    withScores = false,
-  ): Promise<string[]> {
+  async zrange(key: string, start: number, stop: number, withScores = false): Promise<string[]> {
     return withScores
       ? this.client.zrange(key, start, stop, 'WITHSCORES')
       : this.client.zrange(key, start, stop);

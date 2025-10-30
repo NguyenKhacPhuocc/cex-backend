@@ -19,14 +19,8 @@ export class WalletsController {
   // nạp tiền vào ví
   @Post('deposit')
   @Roles(UserRole.USER)
-  async depositToUser(
-    @GetUser() user: User,
-    @Body() walletTransactionDto: WalletTransactionDto,
-  ) {
-    const wallet = await this.walletsService.depositToUser(
-      user.id,
-      walletTransactionDto,
-    );
+  async depositToUser(@GetUser() user: User, @Body() walletTransactionDto: WalletTransactionDto) {
+    const wallet = await this.walletsService.depositToUser(user.id, walletTransactionDto);
     const { user: unusedUser, ...walletDetails } = wallet;
     return {
       message: `Deposited ${walletTransactionDto.amount} ${walletTransactionDto.currency} to ${walletTransactionDto.walletType} wallet`,
@@ -44,10 +38,7 @@ export class WalletsController {
     @GetUser() user: User,
     @Body() walletTransactionDto: WalletTransactionDto,
   ) {
-    const wallet = await this.walletsService.withdrawFromUser(
-      user.id,
-      walletTransactionDto,
-    );
+    const wallet = await this.walletsService.withdrawFromUser(user.id, walletTransactionDto);
 
     const { user: unusedUser, ...walletDetails } = wallet;
     return {
@@ -62,10 +53,7 @@ export class WalletsController {
   // chuyển tiền giữa các ví nội bộ cập nhật balance/available
   @Post('transfer')
   @Roles(UserRole.USER)
-  async transferBetweenWallets(
-    @GetUser() user: User,
-    @Body() transferDto: TransferDto,
-  ) {
+  async transferBetweenWallets(@GetUser() user: User, @Body() transferDto: TransferDto) {
     await this.walletsService.transferBetweenWallets(user.id, transferDto);
     return {
       message: `Transferred ${transferDto.amount} ${transferDto.currency} from ${transferDto.fromWalletType} to ${transferDto.toWalletType} wallet`,
@@ -76,10 +64,7 @@ export class WalletsController {
   // theo dõi biến động tài sản (chỉ admin được sử dụng)
   @Get('history')
   @Roles(UserRole.ADMIN)
-  async getHistory(
-    @GetUser() user: User,
-    @Query() historyQueryDto: HistoryQueryDto,
-  ) {
+  async getHistory(@GetUser() user: User, @Query() historyQueryDto: HistoryQueryDto) {
     return this.walletsService.getWalletHistory(user.id, historyQueryDto);
   }
 }

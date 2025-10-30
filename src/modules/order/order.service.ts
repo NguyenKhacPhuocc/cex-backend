@@ -43,32 +43,21 @@ export class OrderService implements OnModuleInit {
   ) {}
 
   onModuleInit() {
-    this.logger.log(
-      `[OrderService] Subscribing to channel: ${REDIS_KEYS.ORDER_UPDATE_CHANNEL}`,
-    );
+    this.logger.log(`[OrderService] Subscribing to channel: ${REDIS_KEYS.ORDER_UPDATE_CHANNEL}`);
     this.redisPubSub.subscribe(REDIS_KEYS.ORDER_UPDATE_CHANNEL); // đăng ký kênh lắng nghe cập nhật lệnh
     this.redisPubSub.onMessage(async (channel, message) => {
       if (channel === REDIS_KEYS.ORDER_UPDATE_CHANNEL) {
         const userId = message.userId;
-        this.logger.log(
-          `[OrderService] Received message for userId: ${userId}`,
-        );
+        this.logger.log(`[OrderService] Received message for userId: ${userId}`);
         const redisKey = REDIS_KEYS.USER_OPEN_ORDERS(userId);
-        this.logger.log(
-          `[OrderService] Attempting to delete cache key: ${redisKey}`,
-        );
+        this.logger.log(`[OrderService] Attempting to delete cache key: ${redisKey}`);
         const deleteResult = await this.redisService.del(redisKey);
-        this.logger.log(
-          `[OrderService] Deleted cache key: ${redisKey}, Result: ${deleteResult}`,
-        );
+        this.logger.log(`[OrderService] Deleted cache key: ${redisKey}, Result: ${deleteResult}`);
       }
     });
   }
 
-  async createOrder(
-    user: User,
-    createOrderDto: CreateOrderDto,
-  ): Promise<Order> {
+  async createOrder(user: User, createOrderDto: CreateOrderDto): Promise<Order> {
     const { side, type, price, amount, marketSymbol } = createOrderDto;
 
     const market = await this.marketService.findBySymbol(marketSymbol);
@@ -78,10 +67,8 @@ export class OrderService implements OnModuleInit {
 
     // Balance check and locking
     const walletToLock = WalletType.SPOT;
-    const currencyToLock =
-      side === OrderSide.BUY ? market.quoteAsset : market.baseAsset;
-    const amountToLock =
-      side === OrderSide.BUY ? (price as number) * amount : amount;
+    const currencyToLock = side === OrderSide.BUY ? market.quoteAsset : market.baseAsset;
+    const amountToLock = side === OrderSide.BUY ? (price as number) * amount : amount;
 
     const wallet = await this.walletRepo.findOne({
       where: {
@@ -132,9 +119,7 @@ export class OrderService implements OnModuleInit {
     const cachedOrders = await this.redisService.get(redisKey);
 
     if (cachedOrders) {
-      this.logger.log(
-        `[OrderService] Cache HIT for user ${user.id}, key: ${redisKey}`,
-      );
+      this.logger.log(`[OrderService] Cache HIT for user ${user.id}, key: ${redisKey}`);
       return JSON.parse(cachedOrders);
     }
 
@@ -193,9 +178,7 @@ export class OrderService implements OnModuleInit {
     const order = await this.getOrderById(user, orderId);
 
     if (order.status !== OrderStatus.OPEN) {
-      throw new BadRequestException(
-        `Cannot cancel order with status ${order.status}`,
-      );
+      throw new BadRequestException(`Cannot cancel order with status ${order.status}`);
     }
 
     // Gửi tín hiệu đến matching engine để xóa khỏi orderbook
@@ -208,14 +191,10 @@ export class OrderService implements OnModuleInit {
 
       const remainingAmount = order.amount - order.filled;
       const amountToUnlock =
-        order.side === OrderSide.BUY
-          ? order.price * remainingAmount
-          : remainingAmount;
+        order.side === OrderSide.BUY ? order.price * remainingAmount : remainingAmount;
 
       const currencyToUnlock =
-        order.side === OrderSide.BUY
-          ? order.market.quoteAsset
-          : order.market.baseAsset;
+        order.side === OrderSide.BUY ? order.market.quoteAsset : order.market.baseAsset;
 
       const wallet = await manager.findOne(Wallet, {
         where: {
@@ -267,18 +246,11 @@ export class OrderService implements OnModuleInit {
         if (remainingAmount <= 0) continue;
 
         const amount =
-          order.side === OrderSide.BUY
-            ? (order.price || 0) * remainingAmount
-            : remainingAmount;
+          order.side === OrderSide.BUY ? (order.price || 0) * remainingAmount : remainingAmount;
         const currency =
-          order.side === OrderSide.BUY
-            ? order.market.quoteAsset
-            : order.market.baseAsset;
+          order.side === OrderSide.BUY ? order.market.quoteAsset : order.market.baseAsset;
 
-        amountsToUnlock.set(
-          currency,
-          (amountsToUnlock.get(currency) || 0) + amount,
-        );
+        amountsToUnlock.set(currency, (amountsToUnlock.get(currency) || 0) + amount);
       }
 
       for (const [currency, amount] of amountsToUnlock.entries()) {

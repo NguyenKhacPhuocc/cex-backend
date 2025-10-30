@@ -32,9 +32,7 @@ export class MarketService {
     });
 
     if (existingMarket) {
-      throw new BadRequestException(
-        `Market with symbol ${symbol} already exists.`,
-      );
+      throw new BadRequestException(`Market with symbol ${symbol} already exists.`);
     }
 
     const newMarketData = {

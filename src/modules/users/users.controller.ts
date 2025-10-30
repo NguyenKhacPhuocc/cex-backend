@@ -1,6 +1,8 @@
-// src/modules/wallets/wallets.controller.ts
+// src/modules/users/users.controller.ts
 import { Controller, UseGuards, Get, Post } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { GetUser } from '../../common/decorators/get-user.decorator';
+import { User } from './entities/user.entity';
 import { UserService } from './users.service';
 
 @Controller('users')
@@ -8,10 +10,12 @@ import { UserService } from './users.service';
 export class UserController {
   constructor(private readonly userService: UserService) {}
 
-  // hiển thị thông tin user
+  // Lấy thông tin user hiện tại
   @Get('me')
-  getInfoUser(): string {
-    return '/api/users/me | Lấy thông tin user hiện tại | Dùng để hiển thị profile user';
+  getInfoUser(@GetUser() user: User) {
+    return {
+      user: user, // Interceptor sẽ loại bỏ passwordHash tự động
+    };
   }
 
   // cập nhật thông tin cá nhân

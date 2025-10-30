@@ -18,10 +18,8 @@ import {
   TransactionType,
   TransactionStatus,
 } from '../transactions/entities/transaction.entity';
-import {
-  LedgerEntry,
-  LedgerReferenceType,
-} from '../ledger/entities/ledger.entity';
+import { LedgerEntry, LedgerReferenceType } from '../ledger/entities/ledger.entity';
+import { TradingWebSocketGateway } from 'src/core/websocket/websocket.gateway';
 
 @Injectable()
 export class MatchingEngineService implements OnModuleInit {
@@ -31,6 +29,7 @@ export class MatchingEngineService implements OnModuleInit {
     private readonly orderBookService: OrderBookService,
     private readonly redisService: RedisService,
     private readonly redisPubSub: RedisPubSub,
+    private readonly wsGateway: TradingWebSocketGateway,
     @InjectRepository(Order)
     private orderRepo: Repository<Order>,
     @InjectRepository(User)
@@ -128,19 +127,18 @@ export class MatchingEngineService implements OnModuleInit {
     this.logger.log(
       `[MatchingEngineService] Published cache invalidation message for taker user ${takerUserId} for order ${newOrderEntity.id}`,
     );
+
+    // Broadcast orderbook update to all subscribers
+    await this.wsGateway.broadcastOrderBookUpdate(order.market.symbol);
   }
 
   private async processLimitOrder(order: Order): Promise<number> {
-    const oppositeSide =
-      order.side === OrderSide.BUY ? OrderSide.SELL : OrderSide.BUY;
+    const oppositeSide = order.side === OrderSide.BUY ? OrderSide.SELL : OrderSide.BUY;
     let remainingAmount = order.amount;
 
     while (remainingAmount > 0) {
       // tìm kiếm order tốt nhất từ bên đối diện
-      const bestMatch = await this.orderBookService.getBest(
-        order.market.symbol,
-        oppositeSide,
-      );
+      const bestMatch = await this.orderBookService.getBest(order.market.symbol, oppositeSide);
 
       if (!bestMatch) {
         break; // No match found, break the loop
@@ -200,15 +198,11 @@ export class MatchingEngineService implements OnModuleInit {
   }
 
   private async processMarketOrder(order: Order): Promise<number> {
-    const oppositeSide =
-      order.side === OrderSide.BUY ? OrderSide.SELL : OrderSide.BUY;
+    const oppositeSide = order.side === OrderSide.BUY ? OrderSide.SELL : OrderSide.BUY;
     let remainingAmount = order.amount;
 
     while (Number(remainingAmount) > 0) {
-      const bestMatch = await this.orderBookService.getBest(
-        order.market.symbol,
-        oppositeSide,
-      );
+      const bestMatch = await this.orderBookService.getBest(order.market.symbol, oppositeSide);
 
       if (!bestMatch) {
         this.logger.warn(
@@ -262,20 +256,14 @@ export class MatchingEngineService implements OnModuleInit {
     matchedAmount: number,
   ): Promise<void> {
     // --- Load user và market đầy đủ ---
-    const [fullTakerUser, fullMakerUser, fullTakerMarket, fullMakerMarket] =
-      await Promise.all([
-        this.userRepo.findOne({ where: { id: takerOrder.user.id } }),
-        this.userRepo.findOne({ where: { id: makerOrder.user.id } }),
-        this.marketRepo.findOne({ where: { id: takerOrder.market.id } }),
-        this.marketRepo.findOne({ where: { id: makerOrder.market.id } }),
-      ]);
+    const [fullTakerUser, fullMakerUser, fullTakerMarket, fullMakerMarket] = await Promise.all([
+      this.userRepo.findOne({ where: { id: takerOrder.user.id } }),
+      this.userRepo.findOne({ where: { id: makerOrder.user.id } }),
+      this.marketRepo.findOne({ where: { id: takerOrder.market.id } }),
+      this.marketRepo.findOne({ where: { id: makerOrder.market.id } }),
+    ]);
 
-    if (
-      !fullTakerUser ||
-      !fullMakerUser ||
-      !fullTakerMarket ||
-      !fullMakerMarket
-    ) {
+    if (!fullTakerUser || !fullMakerUser || !fullTakerMarket || !fullMakerMarket) {
       this.logger.error('Failed to load full user or market entities.');
       return;
     }
@@ -297,10 +285,8 @@ export class MatchingEngineService implements OnModuleInit {
     const tradeValue = tradePrice * Number(matchedAmount);
 
     // --- Ghi bản ghi Trade ---
-    const buyOrder =
-      takerOrder.side === OrderSide.BUY ? takerOrder : makerOrder;
-    const sellOrder =
-      takerOrder.side === OrderSide.SELL ? takerOrder : makerOrder;
+    const buyOrder = takerOrder.side === OrderSide.BUY ? takerOrder : makerOrder;
+    const sellOrder = takerOrder.side === OrderSide.SELL ? takerOrder : makerOrder;
 
     const trade = this.tradeRepo.create({
       market: takerOrder.market,
@@ -312,57 +298,46 @@ export class MatchingEngineService implements OnModuleInit {
       seller: sellOrder.user,
     });
     await this.tradeRepo.save(trade);
-    this.logger.log(
-      `Trade ${trade.id} executed: ${matchedAmount} @ ${tradePrice}`,
-    );
+    this.logger.log(`Trade ${trade.id} executed: ${matchedAmount} @ ${tradePrice}`);
 
     // --- Xác định buyer/seller và ví liên quan ---
     const buyerUser = buyOrder.user;
     const sellerUser = sellOrder.user;
     const market = takerOrder.market;
 
-    const [
-      buyerQuoteWallet,
-      buyerBaseWallet,
-      sellerBaseWallet,
-      sellerQuoteWallet,
-    ] = await Promise.all([
-      this.walletRepo.findOne({
-        where: {
-          user: { id: buyerUser.id },
-          currency: market.quoteAsset,
-          walletType: WalletType.SPOT,
-        },
-      }),
-      this.walletRepo.findOne({
-        where: {
-          user: { id: buyerUser.id },
-          currency: market.baseAsset,
-          walletType: WalletType.SPOT,
-        },
-      }),
-      this.walletRepo.findOne({
-        where: {
-          user: { id: sellerUser.id },
-          currency: market.baseAsset,
-          walletType: WalletType.SPOT,
-        },
-      }),
-      this.walletRepo.findOne({
-        where: {
-          user: { id: sellerUser.id },
-          currency: market.quoteAsset,
-          walletType: WalletType.SPOT,
-        },
-      }),
-    ]);
+    const [buyerQuoteWallet, buyerBaseWallet, sellerBaseWallet, sellerQuoteWallet] =
+      await Promise.all([
+        this.walletRepo.findOne({
+          where: {
+            user: { id: buyerUser.id },
+            currency: market.quoteAsset,
+            walletType: WalletType.SPOT,
+          },
+        }),
+        this.walletRepo.findOne({
+          where: {
+            user: { id: buyerUser.id },
+            currency: market.baseAsset,
+            walletType: WalletType.SPOT,
+          },
+        }),
+        this.walletRepo.findOne({
+          where: {
+            user: { id: sellerUser.id },
+            currency: market.baseAsset,
+            walletType: WalletType.SPOT,
+          },
+        }),
+        this.walletRepo.findOne({
+          where: {
+            user: { id: sellerUser.id },
+            currency: market.quoteAsset,
+            walletType: WalletType.SPOT,
+          },
+        }),
+      ]);
 
-    if (
-      !buyerQuoteWallet ||
-      !buyerBaseWallet ||
-      !sellerBaseWallet ||
-      !sellerQuoteWallet
-    ) {
+    if (!buyerQuoteWallet || !buyerBaseWallet || !sellerBaseWallet || !sellerQuoteWallet) {
       this.logger.error('One or more wallets not found for trade execution.');
       return;
     }
@@ -370,28 +345,20 @@ export class MatchingEngineService implements OnModuleInit {
     // --- Cập nhật ví khi có 2 user khác nhau ---
     if (takerOrder.side === OrderSide.BUY) {
       // Buyer (taker)
-      buyerQuoteWallet.frozen =
-        Number(buyerQuoteWallet.frozen) - Number(tradeValue);
-      buyerBaseWallet.available =
-        Number(buyerBaseWallet.available) + Number(matchedAmount);
+      buyerQuoteWallet.frozen = Number(buyerQuoteWallet.frozen) - Number(tradeValue);
+      buyerBaseWallet.available = Number(buyerBaseWallet.available) + Number(matchedAmount);
 
       // Seller (maker)
-      sellerBaseWallet.frozen =
-        Number(sellerBaseWallet.frozen) - Number(matchedAmount);
-      sellerQuoteWallet.available =
-        Number(sellerQuoteWallet.available) + Number(tradeValue);
+      sellerBaseWallet.frozen = Number(sellerBaseWallet.frozen) - Number(matchedAmount);
+      sellerQuoteWallet.available = Number(sellerQuoteWallet.available) + Number(tradeValue);
     } else if (takerOrder.side === OrderSide.SELL) {
       // Seller (taker)
-      sellerBaseWallet.frozen =
-        Number(sellerBaseWallet.frozen) - Number(matchedAmount);
-      sellerQuoteWallet.available =
-        Number(sellerQuoteWallet.available) + Number(tradeValue);
+      sellerBaseWallet.frozen = Number(sellerBaseWallet.frozen) - Number(matchedAmount);
+      sellerQuoteWallet.available = Number(sellerQuoteWallet.available) + Number(tradeValue);
 
       // Buyer (maker)
-      buyerQuoteWallet.frozen =
-        Number(buyerQuoteWallet.frozen) - Number(tradeValue);
-      buyerBaseWallet.available =
-        Number(buyerBaseWallet.available) + Number(matchedAmount);
+      buyerQuoteWallet.frozen = Number(buyerQuoteWallet.frozen) - Number(tradeValue);
+      buyerBaseWallet.available = Number(buyerBaseWallet.available) + Number(matchedAmount);
     }
 
     // Đảm bảo không có giá trị âm
@@ -401,22 +368,14 @@ export class MatchingEngineService implements OnModuleInit {
     sellerQuoteWallet.available = Math.max(0, sellerQuoteWallet.available);
 
     // --- Cập nhật lại balance ---
-    buyerQuoteWallet.balance =
-      Number(buyerQuoteWallet.available) + Number(buyerQuoteWallet.frozen);
-    buyerBaseWallet.balance =
-      Number(buyerBaseWallet.available) + Number(buyerBaseWallet.frozen);
-    sellerBaseWallet.balance =
-      Number(sellerBaseWallet.available) + Number(sellerBaseWallet.frozen);
+    buyerQuoteWallet.balance = Number(buyerQuoteWallet.available) + Number(buyerQuoteWallet.frozen);
+    buyerBaseWallet.balance = Number(buyerBaseWallet.available) + Number(buyerBaseWallet.frozen);
+    sellerBaseWallet.balance = Number(sellerBaseWallet.available) + Number(sellerBaseWallet.frozen);
     sellerQuoteWallet.balance =
       Number(sellerQuoteWallet.available) + Number(sellerQuoteWallet.frozen);
 
     // --- Kiểm tra an toàn ---
-    for (const w of [
-      buyerQuoteWallet,
-      buyerBaseWallet,
-      sellerBaseWallet,
-      sellerQuoteWallet,
-    ]) {
+    for (const w of [buyerQuoteWallet, buyerBaseWallet, sellerBaseWallet, sellerQuoteWallet]) {
       if (w.frozen < 0 || w.available < 0) {
         this.logger.error(`Wallet ${w.id} negative after trade`);
         return;
@@ -511,8 +470,27 @@ export class MatchingEngineService implements OnModuleInit {
     ];
     await this.ledgerRepo.save(ledgerEntries);
 
+    this.logger.log(`Transactions and ledger entries saved for trade ${trade.id}`);
+
+    // 🔥 Emit WebSocket events to notify users about trade execution
+    this.wsGateway.emitTradeExecuted({
+      tradeId: String(trade.id),
+      buyerId: String(buyerUser.id),
+      sellerId: String(sellerUser.id),
+      symbol: market.symbol,
+      price: tradePrice,
+      amount: matchedAmount,
+    });
+
+    // Emit balance updates to both users
+    this.wsGateway.emitBalanceUpdate(String(buyerUser.id));
+    this.wsGateway.emitBalanceUpdate(String(sellerUser.id));
+
+    // Broadcast orderbook update to all subscribers
+    await this.wsGateway.broadcastOrderBookUpdate(market.symbol);
+
     this.logger.log(
-      `Transactions and ledger entries saved for trade ${trade.id}`,
+      `📡 WebSocket events emitted for trade ${trade.id} (buyer: ${buyerUser.id}, seller: ${sellerUser.id})`,
     );
   }
 }

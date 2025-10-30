@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-unsafe-return */
-/* eslint-disable prettier/prettier */
+
 import { Injectable, Logger } from '@nestjs/common';
 import { RedisService } from 'src/core/redis/redis.service';
 import { Order } from 'src/modules/order/entities/order.entity';
@@ -9,7 +9,7 @@ import { OrderSide } from 'src/shared/enums/order-side.enum';
 export class OrderBookService {
   private readonly logger = new Logger(OrderBookService.name);
 
-  constructor(private readonly redis: RedisService) { }
+  constructor(private readonly redis: RedisService) {}
 
   private getBookKey(symbol: string, side: OrderSide): string {
     return `orderbook:${symbol}:${side}`;
@@ -22,7 +22,7 @@ export class OrderBookService {
   async add(order: Order): Promise<void> {
     const bookKey = this.getBookKey(order.market.symbol, order.side);
     const score = order.side === OrderSide.BUY ? -order.price : order.price;
-    
+
     // Store the full order in a hash
     const hashKey = this.getOrderHashKey(order.market.symbol);
     await this.redis.hset(hashKey, order.id, JSON.stringify(order));
@@ -33,10 +33,7 @@ export class OrderBookService {
     this.logger.log(`Added order ${order.id} to order book ${bookKey}`);
   }
 
-  async getBest(
-    symbol: string,
-    side: OrderSide,
-  ): Promise<Order | null> {
+  async getBest(symbol: string, side: OrderSide): Promise<Order | null> {
     const bookKey = this.getBookKey(symbol, side);
     const range = await this.redis.zrange(bookKey, 0, 0);
 
@@ -62,5 +59,85 @@ export class OrderBookService {
     await this.redis.hdel(hashKey, order.id);
 
     this.logger.log(`Removed order ${order.id} from order book ${bookKey}`);
+  }
+
+  /**
+   * Get orderbook snapshot for WebSocket
+   * Returns top N asks and bids with aggregated amounts by price level
+   */
+  async getOrderBookSnapshot(
+    symbol: string,
+    depth = 20,
+  ): Promise<{
+    symbol: string;
+    asks: Array<{ price: number; amount: number; total: number }>;
+    bids: Array<{ price: number; amount: number; total: number }>;
+  }> {
+    const hashKey = this.getOrderHashKey(symbol);
+
+    // Get top asks (sorted by price ascending)
+    const askBookKey = this.getBookKey(symbol, OrderSide.SELL);
+    const askIds = await this.redis.zrange(askBookKey, 0, depth - 1);
+
+    // Get top bids (sorted by price descending via negative score)
+    const bidBookKey = this.getBookKey(symbol, OrderSide.BUY);
+    const bidIds = await this.redis.zrange(bidBookKey, 0, depth - 1);
+
+    // Fetch full order data
+    const askOrders = await Promise.all(
+      askIds.map(async (id) => {
+        const data = await this.redis.hget(hashKey, id);
+        return data ? JSON.parse(data) : null;
+      }),
+    );
+
+    const bidOrders = await Promise.all(
+      bidIds.map(async (id) => {
+        const data = await this.redis.hget(hashKey, id);
+        return data ? JSON.parse(data) : null;
+      }),
+    );
+
+    // Aggregate by price level
+    const aggregateOrders = (
+      orders: Order[],
+    ): Array<{ price: number; amount: number; total: number }> => {
+      const priceMap = new Map<number, { amount: number; total: number }>();
+
+      orders
+        .filter((o) => o !== null)
+        .forEach((order) => {
+          const price = Number(order.price);
+          const amount = Number(order.amount);
+          const existing = priceMap.get(price);
+
+          if (existing) {
+            existing.amount += amount;
+            existing.total = existing.amount * price;
+          } else {
+            priceMap.set(price, {
+              amount,
+              total: amount * price,
+            });
+          }
+        });
+
+      return Array.from(priceMap.entries())
+        .map(([price, data]) => ({
+          price,
+          amount: data.amount,
+          total: data.total,
+        }))
+        .sort((a, b) => a.price - b.price); // Sort by price ascending
+    };
+
+    const asks = aggregateOrders(askOrders);
+    const bids = aggregateOrders(bidOrders).reverse(); // Reverse to get descending
+
+    return {
+      symbol,
+      asks,
+      bids,
+    };
   }
 }

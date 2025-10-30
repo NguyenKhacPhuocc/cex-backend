@@ -25,10 +25,7 @@ export class TransactionsService {
     });
   }
 
-  async getTransactionById(
-    id: string,
-    userId: number,
-  ): Promise<Transaction | null> {
+  async getTransactionById(id: string, userId: number): Promise<Transaction | null> {
     return this.transactionRepo.findOne({
       where: {
         id,

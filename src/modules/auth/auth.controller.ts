@@ -34,10 +34,7 @@ export class AuthController {
 
   @Throttle({ auth: { limit: 5, ttl: 60000 } }) // 5 attempts per minute
   @Post('login')
-  async login(
-    @Body() loginDto: LoginUserDto,
-    @Res({ passthrough: true }) res: Response,
-  ) {
+  async login(@Body() loginDto: LoginUserDto, @Res({ passthrough: true }) res: Response) {
     const result = await this.authService.login(loginDto);
 
     // Set accessToken trong HTTP-only cookie (1 hour)
@@ -58,24 +55,25 @@ export class AuthController {
       path: '/', // Explicit path
     });
 
-    // Không trả về tokens trong response body (bảo mật)
-    const { accessToken, refreshToken, ...response } = result;
-    return response;
+    // 🚨 DEVELOPMENT ONLY - Trả về tokens để test Postman
+    // ❌ KHÔNG làm điều này trong PRODUCTION!
+    // TODO: Xóa phần này trước khi deploy
+    return result; // Bao gồm cả accessToken và refreshToken
+
+    // 🔒 PRODUCTION CODE (comment lại để test):
+    // const { accessToken, refreshToken, ...response } = result;
+    // return response;
   }
 
   @Throttle({ auth: { limit: 10, ttl: 60000 } }) // 10 refreshes per minute
   @Post('refresh')
-  async refresh(
-    @Req() req: RequestWithCookies,
-    @Res({ passthrough: true }) res: Response,
-  ) {
+  async refresh(@Req() req: RequestWithCookies, @Res({ passthrough: true }) res: Response) {
     const refreshToken = req.cookies?.refreshToken;
     if (!refreshToken) {
       throw new UnauthorizedException('Không tìm thấy refresh token');
     }
 
-    const { accessToken } =
-      await this.authService.refreshAccessToken(refreshToken);
+    const { accessToken } = await this.authService.refreshAccessToken(refreshToken);
 
     // Set new accessToken in cookie
     res.cookie('accessToken', accessToken, {
