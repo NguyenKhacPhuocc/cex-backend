@@ -16,6 +16,8 @@ import { AdminModule } from './modules/admin/admin.module';
 import { OrderModule } from './modules/order/order.module';
 import { TradingModule } from './modules/trading/trading.module';
 import { MatchingEngineModule } from './modules/matching-engine/matching-engine.module';
+import { TradesModule } from './modules/trades/trades.module';
+import { DevModule } from './modules/dev/dev.module';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { APP_GUARD } from '@nestjs/core';
 import { CustomThrottlerGuard } from './common/guards/custom-throttler.guard';
@@ -53,6 +55,8 @@ import { CustomThrottlerGuard } from './common/guards/custom-throttler.guard';
     OrderModule,
     TradingModule,
     MatchingEngineModule,
+    TradesModule,
+    DevModule,
   ],
   controllers: [AppController],
   providers: [
