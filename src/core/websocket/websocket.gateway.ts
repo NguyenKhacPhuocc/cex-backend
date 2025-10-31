@@ -13,6 +13,7 @@ import { Server, Socket } from 'socket.io';
 import { Logger, forwardRef, Inject } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { OrderBookService } from '../../modules/trading/order-book.service';
+import { MarketService } from '../../modules/market/market.service';
 
 @WebSocketGateway({
   cors: {
@@ -35,6 +36,8 @@ export class TradingWebSocketGateway
     private jwtService: JwtService,
     @Inject(forwardRef(() => OrderBookService))
     private orderBookService: OrderBookService,
+    @Inject(forwardRef(() => MarketService))
+    private marketService: MarketService,
   ) {
     this.logger.log('🚀 TradingWebSocketGateway CONSTRUCTOR called');
   }
@@ -163,8 +166,9 @@ export class TradingWebSocketGateway
     symbol: string;
     price: number;
     amount: number;
+    takerSide: 'BUY' | 'SELL'; // Taker side for market display color
   }) {
-    const { tradeId, buyerId, sellerId, symbol, price, amount } = tradeData;
+    const { tradeId, buyerId, sellerId, symbol, price, amount, takerSide } = tradeData;
 
     // Notify buyer
     this.server.to(`user:${buyerId}`).emit('trade:executed', {
@@ -197,8 +201,13 @@ export class TradingWebSocketGateway
       id: parseInt(tradeId),
       price,
       amount,
-      side: 'BUY',
+      side: takerSide, // Use takerSide for color display (BUY = green, SELL = red)
       timestamp: new Date(),
+    });
+
+    // Broadcast ticker update for this symbol (public event - no subscription needed)
+    this.broadcastTickerUpdate(symbol).catch((error) => {
+      this.logger.error(`Error broadcasting ticker update for ${symbol}:`, error);
     });
   }
 
@@ -312,6 +321,25 @@ export class TradingWebSocketGateway
       );
     } catch (error) {
       this.logger.error(`Error broadcasting orderbook update for ${symbol}:`, error);
+    }
+  }
+
+  // Broadcast ticker update to all connected clients (public event)
+  async broadcastTickerUpdate(symbol: string): Promise<void> {
+    try {
+      const ticker = await this.marketService.getTickerBySymbol(symbol);
+
+      if (!ticker) {
+        this.logger.warn(`Ticker not found for symbol: ${symbol}`);
+        return;
+      }
+
+      // Broadcast to all connected clients (public market data)
+      this.server.emit('ticker:update', ticker);
+
+      this.logger.log(`📈 Broadcasted ticker:update for ${symbol} to all clients`);
+    } catch (error) {
+      this.logger.error(`Error broadcasting ticker update for ${symbol}:`, error);
     }
   }
 }

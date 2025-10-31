@@ -119,12 +119,15 @@ export class TradesService {
 
     const result = trades.map((trade) => {
       console.log(`🕐 Trade ${trade.id} timestamp:`, trade.timestamp, typeof trade.timestamp);
+      // Use takerSide if available, otherwise default to BUY
+      // takerSide determines color: BUY = green (price went up), SELL = red (price went down)
+      const side = (trade.takerSide || 'BUY') as 'BUY' | 'SELL';
       return {
         id: trade.id,
         price: Number(trade.price), // Convert decimal string to number
         amount: Number(trade.amount), // Convert decimal string to number
         total: (Number(trade.price) * Number(trade.amount)).toFixed(8),
-        side: 'BUY' as const, // We determine side by buyer (all trades are from buyer perspective in public view)
+        side, // Use takerSide from database
         timestamp: trade.timestamp
           ? new Date(trade.timestamp).toISOString()
           : new Date().toISOString(),

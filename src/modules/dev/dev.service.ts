@@ -70,15 +70,24 @@ export class DevService {
 
   private async clearRedis(): Promise<void> {
     try {
+      // Log all keys before clearing
+      const allKeysBefore = await this.redis.keys('*');
+      this.logger.log(`📦 Found ${allKeysBefore.length} keys in Redis before clearing`);
+      if (allKeysBefore.length > 0) {
+        this.logger.log(`Keys: ${allKeysBefore.join(', ')}`);
+      }
+
       // Get all markets to clear their order books
       const markets = await this.marketRepository.find();
 
       for (const market of markets) {
         const symbol = market.symbol;
 
-        // Clear order books (asks and bids)
+        // Clear order books (ZSETs for sorted orders)
         await this.redis.del(`orderbook:${symbol}:asks`);
         await this.redis.del(`orderbook:${symbol}:bids`);
+
+        // Clear order hash maps (order details)
         await this.redis.del(`orderbook:${symbol}:asks:hash`);
         await this.redis.del(`orderbook:${symbol}:bids:hash`);
 
@@ -99,7 +108,21 @@ export class DevService {
         this.logger.log(`✅ Cleared ${orderKeys.length} order keys`);
       }
 
-      this.logger.log('✅ Redis cleared successfully');
+      // Clear any remaining orderbook keys (catch-all)
+      const orderbookKeys = await this.redis.keys('orderbook:*');
+      if (orderbookKeys.length > 0) {
+        await this.redis.del(...orderbookKeys);
+        this.logger.log(`✅ Cleared ${orderbookKeys.length} orderbook keys`);
+      }
+
+      // Verify all keys are cleared
+      const allKeysAfter = await this.redis.keys('*');
+      if (allKeysAfter.length > 0) {
+        this.logger.warn(`⚠️ Warning: ${allKeysAfter.length} keys still remain in Redis`);
+        this.logger.warn(`Remaining keys: ${allKeysAfter.join(', ')}`);
+      } else {
+        this.logger.log('✅ All Redis keys cleared successfully');
+      }
     } catch (error) {
       this.logger.error('❌ Failed to clear Redis:', error);
       throw error;

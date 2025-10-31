@@ -144,11 +144,15 @@ export class MatchingEngineService implements OnModuleInit {
         break; // No match found, break the loop
       }
 
-      // Prevent self-matching
+      // Prevent self-matching (self-trade prevention)
+      // Skip this order but keep it in orderbook for other users to match
       if (bestMatch.user.id === order.user.id) {
-        // Remove this order from book and continue searching
-        await this.orderBookService.remove(bestMatch);
-        continue;
+        this.logger.log(
+          `Self-trade prevention: Skipping order ${bestMatch.id} (same user ${order.user.id})`,
+        );
+        // Do NOT remove - just break to stop matching
+        // Both orders will remain in orderbook for other users
+        break;
       }
 
       const canMatch =
@@ -211,11 +215,15 @@ export class MatchingEngineService implements OnModuleInit {
         break; // No match found
       }
 
-      // Prevent self-matching
+      // Prevent self-matching (self-trade prevention)
+      // For market orders, skip if it's the same user
       if (bestMatch.user.id === order.user.id) {
-        // Remove this order from book and continue searching
-        await this.orderBookService.remove(bestMatch);
-        continue;
+        this.logger.log(
+          `Self-trade prevention: Market order ${order.id} cannot match with own order ${bestMatch.id}`,
+        );
+        // Market order fails to execute if best match is own order
+        // Stop processing - market order may remain partially filled or unfilled
+        break;
       }
 
       // Immediately remove the matched order from the book
@@ -296,6 +304,7 @@ export class MatchingEngineService implements OnModuleInit {
       sellOrder,
       buyer: buyOrder.user,
       seller: sellOrder.user,
+      takerSide: takerOrder.side === OrderSide.BUY ? 'BUY' : 'SELL', // Save taker side for market display
     });
     await this.tradeRepo.save(trade);
     this.logger.log(`Trade ${trade.id} executed: ${matchedAmount} @ ${tradePrice}`);
@@ -480,6 +489,7 @@ export class MatchingEngineService implements OnModuleInit {
       symbol: market.symbol,
       price: tradePrice,
       amount: matchedAmount,
+      takerSide: takerOrder.side === OrderSide.BUY ? 'BUY' : 'SELL', // Pass taker side for market display
     });
 
     // Emit balance updates to both users

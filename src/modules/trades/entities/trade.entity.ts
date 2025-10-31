@@ -36,6 +36,11 @@ export class Trade {
   @Column('decimal', { precision: 20, scale: 8, default: 0 })
   fee: number;
 
+  // Taker side: 'BUY' if taker was buyer, 'SELL' if taker was seller
+  // This determines the color in market trades display (green for BUY, red for SELL)
+  @Column({ type: 'varchar', length: 4, nullable: true })
+  takerSide: 'BUY' | 'SELL';
+
   @ManyToOne(() => User, { onDelete: 'SET NULL' })
   @JoinColumn({ name: 'buyer_id' })
   buyer: User;

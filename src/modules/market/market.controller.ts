@@ -12,22 +12,23 @@ export class MarketController {
     return this.marketService.findAll();
   }
 
+  // Lấy giá hiện tại, phần trăm thay đổi 24h, volume 24h của tất cả cặp, Dữ liệu tổng hợp từ trades hoặc Redis cache (cập nhật mỗi 3–5s).
+  @Get('ticker')
+  async getAllTickers() {
+    return this.marketService.getAllTickers();
+  }
+
+  //Lấy thông tin ticker cụ thể cho 1 cặp, Cache trong Redis, đồng bộ với trade:new event từ Redis Pub/Sub.
+  @Get('ticker/:symbol')
+  async getTickerBySymbol(@Param('symbol') symbol: string) {
+    const tickers = await this.marketService.getAllTickers();
+    return tickers.find((t) => t.symbol === symbol.toUpperCase()) || null;
+  }
+
   // lấy thông tin 1 cặp giao dịch
   @Get(':symbol')
   async getInfoMarket(@Param('symbol') symbol: string) {
     return this.marketService.findBySymbol(symbol);
-  }
-
-  // Lấy giá hiện tại, phần trăm thay đổi 24h, volume 24h của tất cả cặp, Dữ liệu tổng hợp từ trades hoặc Redis cache (cập nhật mỗi 3–5s).
-  @Get('ticker')
-  getTiker() {
-    return 'getTicker';
-  }
-
-  //Lấy thông tin ticker cụ thể cho 1 cặp, Cache trong Redis, đồng bộ với trade:new event từ Redis Pub/Sub.
-  @Get('ticker')
-  getInfoTiker() {
-    return 'getInfoTiker';
   }
 
   // Lấy sổ lệnh (bids/asks) hiện tại cho thị trường, Đọc từ Redis ZSET (orderbook:{symbol}:buy, orderbook:{symbol}:sell), cực nhanh.
