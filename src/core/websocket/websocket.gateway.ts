@@ -17,7 +17,7 @@ import { MarketService } from '../../modules/market/market.service';
 
 @WebSocketGateway({
   cors: {
-    origin: process.env.FRONTEND_URL || ['http://localhost:3000', 'http://localhost:3001'],
+    origin: process.env.FRONTEND_URL || ['http://localhost:3000'],
     credentials: true,
   },
   namespace: '/trading',
@@ -31,6 +31,7 @@ export class TradingWebSocketGateway
   private readonly logger = new Logger(TradingWebSocketGateway.name);
   private userSockets: Map<string, Set<string>> = new Map(); // userId -> Set of socketIds
   private orderbookSubscriptions: Map<string, Set<string>> = new Map(); // symbol -> Set of socketIds
+  private tickerSubscriptions: Map<string, Set<string>> = new Map(); // symbol -> Set of socketIds
 
   constructor(
     private jwtService: JwtService,
@@ -68,44 +69,60 @@ export class TradingWebSocketGateway
         }
       }
 
+      // ✅ Allow anonymous connections for public market data (ticker, orderbook)
       if (!token) {
-        this.logger.warn(`Client ${client.id} connected without token`);
-        client.disconnect();
+        this.logger.log(`✅ Client ${client.id} connected anonymously (public market data only)`);
+        // Mark as anonymous
+        client.data.userId = null;
+        client.data.isAuthenticated = false;
+
+        // Send confirmation without userId
+        client.emit('connected', { socketId: client.id });
         return;
       }
 
-      // Verify JWT token
+      // Verify JWT token for authenticated users
+      try {
+        const payload = await this.jwtService.verifyAsync(
+          typeof token === 'string' ? token.replace('Bearer ', '') : token,
+        );
+        const userId = payload.sub;
 
-      const payload = await this.jwtService.verifyAsync(
-        typeof token === 'string' ? token.replace('Bearer ', '') : token,
-      );
-      const userId = payload.sub;
+        // Store socket mapping
+        if (!this.userSockets.has(userId)) {
+          this.userSockets.set(userId, new Set());
+        }
+        this.userSockets.get(userId)!.add(client.id);
 
-      // Store socket mapping
-      if (!this.userSockets.has(userId)) {
-        this.userSockets.set(userId, new Set());
+        // Store userId in socket data for later use
+        client.data.userId = userId;
+        client.data.isAuthenticated = true;
+
+        // Join user's personal room
+        await client.join(`user:${userId}`);
+
+        this.logger.log(
+          `✅ Client ${client.id} connected (User: ${userId}, Total sockets: ${this.userSockets.get(userId)!.size})`,
+        );
+
+        // Send confirmation with userId
+        client.emit('connected', { userId, socketId: client.id });
+      } catch {
+        // Token invalid - allow as anonymous
+        this.logger.warn(`⚠️ Invalid token for client ${client.id}, allowing anonymous connection`);
+        client.data.userId = null;
+        client.data.isAuthenticated = false;
+        client.emit('connected', { socketId: client.id });
       }
-      this.userSockets.get(userId)!.add(client.id);
-
-      // Store userId in socket data for later use
-      client.data.userId = userId;
-
-      // Join user's personal room
-      await client.join(`user:${userId}`);
-
-      this.logger.log(
-        `✅ Client ${client.id} connected (User: ${userId}, Total sockets: ${this.userSockets.get(userId)!.size})`,
-      );
-
-      // Send confirmation
-      client.emit('connected', { userId, socketId: client.id });
     } catch (error) {
-      this.logger.error(
-        `❌ Authentication failed for client ${client.id}:`,
+      // Allow connection even on error (public data)
+      this.logger.warn(
+        `⚠️ Connection error for client ${client.id}, allowing anonymous:`,
         error instanceof Error ? error.message : String(error),
       );
-      client.emit('error', { message: 'Authentication failed' });
-      client.disconnect();
+      client.data.userId = null;
+      client.data.isAuthenticated = false;
+      client.emit('connected', { socketId: client.id });
     }
   }
 
@@ -334,12 +351,78 @@ export class TradingWebSocketGateway
         return;
       }
 
-      // Broadcast to all connected clients (public market data)
+      // Broadcast to all subscribers and all connected clients (public market data)
       this.server.emit('ticker:update', ticker);
+
+      // Also emit to specific subscribers if any
+      const subscribers = this.tickerSubscriptions.get(symbol);
+      if (subscribers && subscribers.size > 0) {
+        subscribers.forEach((socketId) => {
+          this.server.to(socketId).emit('ticker:update', ticker);
+        });
+      }
 
       this.logger.log(`📈 Broadcasted ticker:update for ${symbol} to all clients`);
     } catch (error) {
       this.logger.error(`Error broadcasting ticker update for ${symbol}:`, error);
     }
+  }
+
+  // ========== Ticker Subscription Handlers ==========
+
+  @SubscribeMessage('ticker:subscribe')
+  async handleTickerSubscribe(client: Socket, payload: { symbol: string }): Promise<void> {
+    const { symbol } = payload;
+
+    if (!symbol) {
+      this.logger.warn(`Client ${client.id} tried to subscribe to ticker without symbol`);
+      client.emit('ticker:error', { message: 'Symbol is required' });
+      return;
+    }
+
+    // Add client to symbol subscribers
+    if (!this.tickerSubscriptions.has(symbol)) {
+      this.tickerSubscriptions.set(symbol, new Set());
+    }
+    this.tickerSubscriptions.get(symbol)!.add(client.id);
+
+    this.logger.log(`📈 Client ${client.id} subscribed to ticker: ${symbol}`);
+
+    // Send initial snapshot
+    try {
+      const ticker = await this.marketService.getTickerBySymbol(symbol);
+
+      if (ticker) {
+        client.emit('ticker:snapshot', ticker);
+        this.logger.log(`📸 Sent ticker snapshot to ${client.id} for ${symbol}`);
+      } else {
+        client.emit('ticker:error', {
+          message: `Ticker not found for symbol: ${symbol}`,
+        });
+      }
+    } catch (error) {
+      this.logger.error(`Error fetching ticker snapshot for ${symbol}:`, error);
+      client.emit('ticker:error', {
+        message: 'Failed to fetch ticker',
+      });
+    }
+  }
+
+  @SubscribeMessage('ticker:unsubscribe')
+  handleTickerUnsubscribe(client: Socket, payload: { symbol: string }): void {
+    const { symbol } = payload;
+
+    if (!symbol) return;
+
+    const subscribers = this.tickerSubscriptions.get(symbol);
+    if (subscribers) {
+      subscribers.delete(client.id);
+
+      if (subscribers.size === 0) {
+        this.tickerSubscriptions.delete(symbol);
+      }
+    }
+
+    this.logger.log(`Client ${client.id} unsubscribed from ticker: ${symbol}`);
   }
 }

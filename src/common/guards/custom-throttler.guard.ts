@@ -13,6 +13,7 @@ export class CustomThrottlerGuard extends ThrottlerGuard {
   protected async shouldSkip(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest();
     const url = request.url as string;
+    const method = request.method as string;
 
     // Skip throttling for balance endpoints (read-only, need real-time updates)
     if (url.startsWith('/api/balances')) {
@@ -20,11 +21,22 @@ export class CustomThrottlerGuard extends ThrottlerGuard {
     }
 
     // Skip throttling for market data endpoints (public, high-frequency reads)
-    if (url.startsWith('/api/market') && request.method === 'GET') {
+    if (url.startsWith('/api/market') && method === 'GET') {
       return true;
     }
 
-    // Apply throttling to all other endpoints (auth, orders, etc.)
+    // Skip throttling for orders endpoints (critical trading endpoints)
+    // Orders need to be executed immediately, rate limiting can cause missed trades
+    if (url.startsWith('/api/orders')) {
+      return true;
+    }
+
+    // Skip throttling for trades endpoints (public market data)
+    if (url.startsWith('/api/trades') && method === 'GET') {
+      return true;
+    }
+
+    // Apply throttling to all other endpoints (auth, etc.)
     return false;
   }
 }

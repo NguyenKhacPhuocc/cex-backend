@@ -121,7 +121,7 @@ export class TradesService {
       console.log(`🕐 Trade ${trade.id} timestamp:`, trade.timestamp, typeof trade.timestamp);
       // Use takerSide if available, otherwise default to BUY
       // takerSide determines color: BUY = green (price went up), SELL = red (price went down)
-      const side = (trade.takerSide || 'BUY') as 'BUY' | 'SELL';
+      const side = trade.takerSide || 'BUY';
       return {
         id: trade.id,
         price: Number(trade.price), // Convert decimal string to number
