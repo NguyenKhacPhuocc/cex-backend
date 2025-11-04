@@ -41,4 +41,5 @@ export const databaseConfig: TypeOrmModuleOptions = {
   // migrationsRun: true,
   // Enable SSL if URL contains sslmode=require or if in production
   ssl: getSSLConfig(),
+  schema: 'public',
 };
