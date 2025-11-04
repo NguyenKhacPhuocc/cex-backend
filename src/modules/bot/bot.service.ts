@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -39,10 +38,15 @@ export class BotService implements OnModuleInit {
 
   async onModuleInit() {
     const enableBots = this.configService.get<string>('ENABLE_BOTS', 'true');
+    this.logger.log(`[BOT_INIT] ENABLE_BOTS=${enableBots}`);
 
     if (enableBots === 'true') {
+      this.logger.log('[BOT_INIT] ✅ Bots enabled, starting initialization...');
       await this.initializeBots();
       this.startTradingLoop();
+      this.logger.log('[BOT_INIT] ✅ Bot initialization complete');
+    } else {
+      this.logger.log('[BOT_INIT] ❌ Bots disabled, skipping initialization');
     }
   }
 
@@ -50,11 +54,20 @@ export class BotService implements OnModuleInit {
     try {
       // Configuration from environment
       const botCount = parseInt(this.configService.get<string>('BOT_COUNT', '5'));
+      this.logger.log(`[BOT_INIT] Creating ${botCount} bots...`);
 
       // Get active markets FIRST
       const markets = await this.marketRepo.find({
         where: { status: MarketStatus.ACTIVE },
       });
+
+      this.logger.log(
+        `[BOT_INIT] Found ${markets.length} active markets: ${markets.map((m) => m.symbol).join(', ')}`,
+      );
+
+      if (markets.length === 0) {
+        this.logger.warn('[BOT_INIT] ⚠️ WARNING: No active markets found! Bots will not trade.');
+      }
 
       // Get or create bot users
       for (let i = 1; i <= botCount; i++) {
@@ -69,6 +82,9 @@ export class BotService implements OnModuleInit {
             role: UserRole.USER,
           });
           bot = await this.userRepo.save(bot);
+          this.logger.log(`[BOT_INIT] ✅ Created bot user: ${email} (ID: ${bot.id})`);
+        } else {
+          this.logger.log(`[BOT_INIT] ⏭️ Bot user already exists: ${email} (ID: ${bot.id})`);
         }
 
         this.bots.push(bot);
@@ -93,6 +109,9 @@ export class BotService implements OnModuleInit {
               symbol: market.symbol,
               lastAction: 0,
             });
+            this.logger.debug(
+              `[BOT_STRATEGY] Assigned MarketMaker strategy to bot${botIndex + 1} for ${market.symbol}`,
+            );
           } else if (botIndex % 3 === 1) {
             // Trend Follower bot
             strategy = new TrendFollowerStrategy(market.symbol);
@@ -102,6 +121,9 @@ export class BotService implements OnModuleInit {
               symbol: market.symbol,
               lastAction: 0,
             });
+            this.logger.debug(
+              `[BOT_STRATEGY] Assigned TrendFollower strategy to bot${botIndex + 1} for ${market.symbol}`,
+            );
           } else {
             // Random Trader bot
             strategy = new RandomTraderStrategy(market.symbol);
@@ -111,6 +133,9 @@ export class BotService implements OnModuleInit {
               symbol: market.symbol,
               lastAction: 0,
             });
+            this.logger.debug(
+              `[BOT_STRATEGY] Assigned RandomTrader strategy to bot${botIndex + 1} for ${market.symbol}`,
+            );
           }
 
           // Set market info for dynamic amount calculation
@@ -121,7 +146,12 @@ export class BotService implements OnModuleInit {
           });
         }
       }
-    } catch {
+
+      this.logger.log(
+        `[BOT_INIT] ✅ Initialized ${this.bots.length} bots with ${this.strategies.size} strategy instances`,
+      );
+    } catch (error) {
+      this.logger.error(`[BOT_INIT] ❌ Failed to initialize bots:`, error);
       // Silently fail - initialization errors are not critical
     }
   }
@@ -197,6 +227,7 @@ export class BotService implements OnModuleInit {
     if (this.isRunning) return;
 
     this.isRunning = true;
+    this.logger.log(`[BOT_LOOP] 🚀 Starting trading loop with ${this.bots.length} bots...`);
 
     // Main trading loop - run every 1 second
     setInterval(() => {
@@ -211,9 +242,11 @@ export class BotService implements OnModuleInit {
 
     // Poll Binance prices periodically
     this.listenToBinancePrices();
+    this.logger.log('[BOT_LOOP] ✅ Trading loop started');
   }
 
   private listenToBinancePrices(): void {
+    this.logger.log('[BOT_PRICE] 📡 Starting Binance price listener...');
     // Poll Binance prices every 1 second to closely follow market
     // Immediate update on start
     void this.updateBinancePrices();
@@ -226,16 +259,24 @@ export class BotService implements OnModuleInit {
 
   private async updateBinancePrices(): Promise<void> {
     const markets = await this.marketRepo.find({
-      where: { status: 'active' as any },
+      where: { status: MarketStatus.ACTIVE },
     });
 
+    let priceUpdates = 0;
     for (const market of markets) {
       const binancePrice = await this.binanceService.getLastPrice(market.symbol);
 
       if (binancePrice) {
         // Update strategies with new price
         this.updateStrategies(market.symbol, binancePrice);
+        priceUpdates++;
+      } else {
+        this.logger.warn(`[BOT_PRICE] ⚠️ No price found for ${market.symbol}`);
       }
+    }
+
+    if (priceUpdates > 0) {
+      this.logger.debug(`[BOT_PRICE] Updated prices for ${priceUpdates}/${markets.length} markets`);
     }
   }
 
@@ -255,6 +296,7 @@ export class BotService implements OnModuleInit {
 
   private async executeBotStrategies(): Promise<void> {
     const now = Date.now();
+    let executedCount = 0;
 
     for (const [key, { strategy, botId, symbol, lastAction }] of this.strategies) {
       const interval = strategy.getInterval();
@@ -267,16 +309,26 @@ export class BotService implements OnModuleInit {
         const action = strategy.getAction();
         if (!action) continue;
 
+        this.logger.log(
+          `[BOT_EXEC] Bot ${bot.email}: ${action.side} ${action.amount} @ ${action.price} on ${symbol}`,
+        );
+
         await this.executeBotAction(bot, symbol, action);
+        executedCount++;
 
         // Update last action time
         const config = this.strategies.get(key);
         if (config) {
           config.lastAction = now;
         }
-      } catch {
+      } catch (error) {
+        this.logger.error(`[BOT_EXEC] ❌ Failed to execute action for ${bot.email}:`, error);
         // Silently fail - bots should continue running even if one action fails
       }
+    }
+
+    if (executedCount > 0) {
+      this.logger.log(`[BOT_EXEC] ✅ Executed ${executedCount} bot actions`);
     }
   }
 
@@ -294,6 +346,7 @@ export class BotService implements OnModuleInit {
       });
 
       if (!market) {
+        this.logger.warn(`[BOT_ACTION] ⚠️ Market not found: ${symbol}`);
         return;
       }
 
@@ -335,8 +388,13 @@ export class BotService implements OnModuleInit {
         amount: action.amount,
       };
 
+      this.logger.log(
+        `[BOT_ORDER] 📝 Creating order for ${bot.email}: ${JSON.stringify(createOrderDto)}`,
+      );
       await this.orderService.createOrder(bot, createOrderDto);
-    } catch {
+      this.logger.log(`[BOT_ORDER] ✅ Order created successfully for ${bot.email}`);
+    } catch (error) {
+      this.logger.error(`[BOT_ORDER] ❌ Failed to create order:`, error);
       // Silently fail - bots should continue running even if one order fails
     }
   }

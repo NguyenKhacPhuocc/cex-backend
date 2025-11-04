@@ -5,8 +5,9 @@ import Redis from 'ioredis';
 import { Trade } from '../trades/entities/trade.entity';
 import { Order } from '../order/entities/order.entity';
 import { Wallet, WalletType } from '../wallets/entities/wallet.entity';
-import { Market } from '../market/entities/market.entity';
+import { Market, MarketStatus } from '../market/entities/market.entity';
 import { Candle } from '../candles/entities/candle.entity';
+import { User } from '../users/entities/user.entity';
 
 @Injectable()
 export class DevService {
@@ -23,6 +24,8 @@ export class DevService {
     private readonly marketRepository: Repository<Market>,
     @InjectRepository(Candle)
     private readonly candleRepository: Repository<Candle>,
+    @InjectRepository(User)
+    private readonly userRepository: Repository<User>,
     @Inject('REDIS_CLIENT')
     private readonly redis: Redis,
     private readonly dataSource: DataSource,
@@ -73,6 +76,117 @@ export class DevService {
     } finally {
       await queryRunner.release();
     }
+  }
+  async seedMarkets(): Promise<{
+    message: string;
+    created: number;
+    markets: Array<{ symbol: string; baseAsset: string; quoteAsset: string }>;
+  }> {
+    this.logger.log('🌱 Starting to seed markets...');
+
+    const defaultMarkets = [
+      { baseAsset: 'BTC', quoteAsset: 'USDT' },
+      { baseAsset: 'ETH', quoteAsset: 'USDT' },
+      { baseAsset: 'SOL', quoteAsset: 'USDT' },
+      { baseAsset: 'BNB', quoteAsset: 'USDT' },
+      { baseAsset: 'DOGE', quoteAsset: 'USDT' },
+      { baseAsset: 'XRP', quoteAsset: 'USDT' },
+      { baseAsset: 'ADA', quoteAsset: 'USDT' },
+      { baseAsset: 'AVAX', quoteAsset: 'USDT' },
+      { baseAsset: 'MATIC', quoteAsset: 'USDT' },
+      { baseAsset: 'LTC', quoteAsset: 'USDT' },
+      { baseAsset: 'LINK', quoteAsset: 'USDT' },
+      { baseAsset: 'DOT', quoteAsset: 'USDT' },
+      { baseAsset: 'TAO', quoteAsset: 'USDT' },
+      { baseAsset: 'TON', quoteAsset: 'USDT' },
+      { baseAsset: 'PEPE', quoteAsset: 'USDT' },
+    ];
+
+    const createdMarkets: Array<{ symbol: string; baseAsset: string; quoteAsset: string }> = [];
+
+    for (const market of defaultMarkets) {
+      const symbol = `${market.baseAsset}_${market.quoteAsset}`;
+      const existing = await this.marketRepository.findOne({
+        where: { symbol },
+      });
+
+      if (!existing) {
+        const newMarket = this.marketRepository.create({
+          symbol,
+          baseAsset: market.baseAsset,
+          quoteAsset: market.quoteAsset,
+          status: MarketStatus.ACTIVE,
+          minOrderSize: 0.0001,
+          pricePrecision: 2,
+        });
+        const saved = await this.marketRepository.save(newMarket);
+        this.logger.log(`✅ Created market: ${symbol}`);
+        createdMarkets.push({
+          symbol: saved.symbol,
+          baseAsset: saved.baseAsset,
+          quoteAsset: saved.quoteAsset,
+        });
+      } else {
+        // Market already exists - ensure it's active
+        if (existing.status !== MarketStatus.ACTIVE) {
+          existing.status = MarketStatus.ACTIVE;
+          await this.marketRepository.save(existing);
+          this.logger.log(`🔄 Activated market: ${symbol}`);
+        } else {
+          this.logger.log(`⏭️ Market already exists: ${symbol}`);
+        }
+      }
+    }
+
+    const message =
+      createdMarkets.length > 0
+        ? `✅ Successfully seeded ${createdMarkets.length} new markets`
+        : '✅ All markets already exist and are active';
+
+    this.logger.log(message);
+
+    return {
+      message,
+      created: createdMarkets.length,
+      markets: createdMarkets,
+    };
+  }
+
+  async getBotStatus(): Promise<{
+    message: string;
+    botCount: number;
+    markets: Array<{ symbol: string; status: string }>;
+    botUsers: Array<{ email: string; id: string }>;
+  }> {
+    this.logger.log('🔍 Checking bot status...');
+
+    // Get all bot users
+    const botUsers = await this.userRepository.find({
+      where: {},
+    });
+
+    const botEmails = botUsers
+      .filter((u) => u.email?.toLowerCase().includes('bot'))
+      .map((u) => ({ email: u.email, id: String(u.id) }));
+
+    this.logger.log(`Found ${botEmails.length} bot users`);
+
+    // Get all markets
+    const markets = await this.marketRepository.find();
+    const marketStatus = markets.map((m) => ({
+      symbol: m.symbol,
+      status: m.status as string,
+    }));
+
+    this.logger.log(`Found ${markets.length} markets`);
+    this.logger.log(`Markets: ${JSON.stringify(marketStatus)}`);
+
+    return {
+      message: `Bot status report: ${botEmails.length} bots, ${markets.length} markets`,
+      botCount: botEmails.length,
+      markets: marketStatus,
+      botUsers: botEmails,
+    };
   }
 
   private async clearRedis(): Promise<void> {
