@@ -12,6 +12,23 @@ import { Candle } from 'src/modules/candles/entities/candle.entity';
 
 dotenv.config();
 
+// Detect if SSL is required from DATABASE_URL (e.g., ?sslmode=require from Neon, Supabase)
+const getSSLConfig = (): boolean | object => {
+  const dbUrl = process.env.DATABASE_URL;
+
+  // Check if URL contains sslmode=require
+  if (dbUrl && dbUrl.includes('sslmode=require')) {
+    return { rejectUnauthorized: false };
+  }
+
+  // Fallback: Enable SSL for production (most cloud databases require SSL)
+  if (process.env.NODE_ENV === 'production') {
+    return { rejectUnauthorized: false };
+  }
+
+  return false;
+};
+
 export const databaseConfig: TypeOrmModuleOptions = {
   type: 'postgres',
   url: process.env.DATABASE_URL,
@@ -20,5 +37,6 @@ export const databaseConfig: TypeOrmModuleOptions = {
   entities: [User, UserProfile, Wallet, Transaction, LedgerEntry, Order, Trade, Market, Candle],
   // migrations: ['src/migrations/*.ts'],
   // migrationsRun: true,
-  // ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+  // Enable SSL if URL contains sslmode=require or if in production
+  ssl: getSSLConfig(),
 };
