@@ -593,8 +593,12 @@ export class MatchingEngineService implements OnModuleInit {
       symbol: market.symbol,
       price: tradePrice,
       amount: matchedAmount,
-      takerSide: takerOrder.side === OrderSide.BUY ? 'BUY' : 'SELL', // Pass taker side for market display
+      takerSide: takerOrder.side === OrderSide.BUY ? 'BUY' : 'SELL',
     });
+
+    // 🔥 Explicitly broadcast ticker update (don't wait for async)
+    // This ensures lastPrice, change24h, volume update immediately
+    void this.wsGateway.broadcastTickerUpdate(market.symbol);
 
     // Emit balance updates to both users
     this.wsGateway.emitBalanceUpdate(String(buyerUser.id));
