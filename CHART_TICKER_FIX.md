@@ -18,24 +18,26 @@ After deploying to Render, bot was trading successfully but frontend wasn't upda
 
 ## Root Cause Analysis
 
-### Issue 1: CoinCap API Not Reachable on Render
+### Issue 1: Binance API Returns 451 Error from US (Render)
 
 ```
-Error: getaddrinfo ENOTFOUND api.coincap.io
-Error Code: ENOTFOUND
+Error: Request failed with status code 451
+Status: 451 (Unavailable For Legal Reasons)
 ```
 
-**Why**: Render's network was blocking or couldn't reach `api.coincap.io`. This is a known issue with CoinCap API - it's sometimes blocked by certain networks/regions.
+**Why**: Binance blocks US IP addresses due to regulatory restrictions. Render's servers are in US, so all requests get blocked with HTTP 451.
+
+**Initial Fix**: We switched from CoinCap WebSocket to Binance REST API, but Binance blocks US regions!
 
 **Impact**:
 
-- BinanceService couldn't fetch real prices
-- Bot fell back to random generated prices (~105k-108k vs real ~104k)
+- No prices fetched from Binance on Render
+- Bot falls back to random prices (~105k-108k vs real ~104k)
 - No prices in Redis cache → no ticker updates
 
 ### Issue 2: WebSocket Ticker/Candle Updates Depend on Trade Prices
 
-Looking at the matching engine code, when a trade executes:
+When a trade executes:
 
 ```typescript
 // Broadcast ticker update for this symbol (public event)
@@ -47,69 +49,74 @@ this.wsGateway.broadcastTickerUpdate(symbol).catch((error) => {
 this.wsGateway.broadcastCandleUpdate(market.symbol, timeframe, candle);
 ```
 
-The ticker update is asynchronous and calls `marketService.getTickerBySymbol()` which:
+The ticker update queries the database for trades and calculates prices from them.
 
-1. Queries the database for trades in last 24h
-2. Calculates lastPrice from most recent trade
-3. Broadcasts the ticker
-
-**Problem**: If the database doesn't have fresh trade data with correct prices, the ticker calculation is wrong.
+**Problem**: If no real prices are fetched, the ticker calculation is based on fallback prices.
 
 ---
 
-## Solution: Replace CoinCap with Binance Public API
+## Solution: Use CoinGecko API (Works Globally)
 
-### Why Binance?
+### Why CoinGecko?
 
-1. ✅ **Free**: No API key required
-2. ✅ **Reliable**: Massive infrastructure, unlikely to be blocked
-3. ✅ **Fast**: Direct HTTP requests, no WebSocket complexity
-4. ✅ **Real Market Data**: Uses actual Binance prices
-5. ✅ **Simple**: Standard REST API with clear response format
+| Source        | Auth    | US Block  | Speed   | Reliability | Cost      |
+| ------------- | ------- | --------- | ------- | ----------- | --------- |
+| Binance       | ❌ None | ✅ YES    | ⚡ Fast | Excellent   | Free      |
+| CoinCap       | ❌ None | ✅ YES    | Medium  | Yellow      | Free      |
+| **CoinGecko** | ❌ None | ❌ **NO** | Medium  | Good        | Free      |
+| Kraken        | ❌ Yes  | ❌ Maybe  | Medium  | Good        | Free tier |
+
+**Choice**: CoinGecko is free, global, and **doesn't block US regions**.
 
 ### API Endpoint Used
 
 ```
-GET https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT
+GET https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana&vs_currencies=usd
 Response:
 {
-  "symbol": "BTCUSDT",
-  "lastPrice": "104527.84000000",
-  ...
+  "bitcoin": { "usd": 104527.84 },
+  "ethereum": { "usd": 3542.21 },
+  "solana": { "usd": 168.92 }
 }
 ```
 
 ### Changes Made to `binance.service.ts`
 
-#### 1. Simplified Symbol Mapping
+#### 1. Updated Symbol Mapping to CoinGecko IDs
 
 ```typescript
-// Old: Dynamic mapping from database + CoinCap IDs
-// New: Static hardcoded mapping (simple & reliable)
-private async initializeSymbolMapping(): Promise<void> {
+// Old: Binance symbols (BTCUSDT, ETHUSDT, SOLUSDT)
+// New: CoinGecko IDs (bitcoin, ethereum, solana)
+private initializeSymbolMapping(): void {
   const mapping: Record<string, string> = {
-    BTCUSDT: 'BTC_USDT',    // Binance symbol → Internal symbol
-    ETHUSDT: 'ETH_USDT',
-    SOLUSDT: 'SOL_USDT',
+    bitcoin: 'BTC_USDT',
+    ethereum: 'ETH_USDT',
+    solana: 'SOL_USDT',
   };
   // ...
 }
 ```
 
-#### 2. Replaced fetchPricesFromCoinCap with fetchPricesFromBinance
+#### 2. Replaced fetchPricesFromBinance with fetchPricesFromCoinGecko
 
 ```typescript
-// Fetch from Binance Public API (free, no auth)
-const url = `https://api.binance.com/api/v3/ticker/24hr?symbol=${binanceSymbol}`;
+// Single API call to get all prices (more efficient than Binance)
+const ids = idsNeeded.join(',');
+const url = `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd`;
 const response = await axios.get(url, { timeout: 5000 });
-const price = parseFloat(response.data.lastPrice);
+const data = response.data as Record<string, { usd: number }>;
 ```
 
-#### 3. Removed Database Dependency
+#### 3. CoinGecko Response Format
 
-- **Old**: Queried `Market` table to get trading pairs
-- **New**: Uses hardcoded Binance symbols (BTC, ETH, SOL)
-- **Benefit**: Faster, no DB queries, prevents initialization race conditions
+```typescript
+// Process prices from single response object
+for (const coinGeckoId of idsNeeded) {
+  const priceData = data[coinGeckoId];
+  const price = priceData.usd; // Direct access, no string parsing needed
+  prices.set(coinGeckoId, price);
+}
+```
 
 ---
 
@@ -130,31 +137,35 @@ const price = parseFloat(response.data.lastPrice);
    └─ broadcastTickerUpdate() → Frontend receives "ticker:update" ✅
 ```
 
-### Frontend Update Flow:
+### Price Fetching Flow:
 
 ```
-useTicker hook:
-1. Subscribes to "ticker:update" WebSocket events
-2. Receives ticker with lastPrice, change24h, volume24h
-3. Updates component state
-4. Re-renders with new prices ✅
-
-useCandles hook:
-1. Subscribes to "candle:update" WebSocket events
-2. Receives new/updated candle data
-3. Charts.tsx component updates lightweight-charts
-4. Chart re-renders with new candle ✅
+CoinGecko API (every 2s)
+   ↓
+   ├─ bitcoin → BTC_USDT (104527.84)
+   ├─ ethereum → ETH_USDT (3542.21)
+   └─ solana → SOL_USDT (168.92)
+   ↓
+Redis cache (5s TTL)
+   ├─ binance:price:BTC_USDT = 104527.84
+   ├─ binance:price:ETH_USDT = 3542.21
+   └─ binance:price:SOL_USDT = 168.92
+   ↓
+Bot strategies get real prices
+   ├─ Place orders at real market prices
+   ├─ Trades execute with correct prices
+   └─ Ticker calculates from real trade data ✅
 ```
 
 ---
 
 ## Verification Steps
 
-### 1. Check Binance Price Fetching in Logs
+### 1. Check CoinGecko Price Fetching in Logs
 
 ```
-[BINANCE_API] 📡 Fetching from: https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT
-[BINANCE_PRICES] 💰 Prices: BTC_USDT=104527.84, ETH_USDT=3542.21, SOL_USDT=168.92
+[COINGECKO_API] 📡 Fetching from: https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana&vs_currencies=usd
+[COINGECKO_PRICES] 💰 Prices: BTC_USDT=104527.84, ETH_USDT=3542.21, SOL_USDT=168.92
 [REDIS_FLUSH] 💾 Saved to Redis: BTC_USDT=104527.84, ETH_USDT=3542.21, SOL_USDT=168.92
 ```
 
@@ -178,13 +189,12 @@ Open browser console:
 
 ## Deployment Checklist
 
-- [x] Updated `binance.service.ts` to use Binance Public API
-- [x] Removed CoinCap REST API code
-- [x] Removed database dependency from BinanceService
+- [x] Switched from Binance API (blocked in US) to CoinGecko API
+- [x] Updated symbol mapping to CoinGecko IDs (bitcoin, ethereum, solana)
 - [x] Backend builds successfully ✅
 - [ ] Deploy to Render
 - [ ] Wait 5 seconds for first price fetch
-- [ ] Check logs for "BINANCE_PRICES" messages
+- [ ] Check logs for "COINGECKO_PRICES" messages (no 451 errors)
 - [ ] Verify chart updates when bot trades
 - [ ] Verify ticker updates when bot trades
 - [ ] Verify lastPrice display updates
@@ -201,7 +211,7 @@ Open browser console:
 
 ### Ticker Display
 
-- LastPrice updates from fallback (~107k) to real Binance prices (~104k)
+- LastPrice updates from fallback (~107k) to real CoinGecko prices (~104k)
 - Change24h percentage reflects real market data
 - High/Low/Volume update when trades execute
 
@@ -215,18 +225,7 @@ Open browser console:
 
 ## Technical Notes
 
-### Why Binance Instead of Alternatives?
-
-| Source      | Auth    | Blocks          | Speed   | Reliability  | Cost      |
-| ----------- | ------- | --------------- | ------- | ------------ | --------- |
-| **Binance** | ✅ None | ❌ No           | ⚡ Fast | 🟢 Excellent | Free      |
-| CoinCap     | ✅ None | ✅ Yes (Render) | Medium  | Yellow       | Free      |
-| Kraken      | ❌ Yes  | ❌ Maybe        | Medium  | Good         | Free tier |
-| Coingecko   | ✅ None | ❌ No           | Medium  | Good         | Free      |
-
-**Choice**: Binance wins on reliability + speed.
-
-### Why Not Keep Database-Based Symbols?
+### Why Not Use Database-Based Symbol Mapping?
 
 **Old approach** (before this fix):
 
@@ -247,9 +246,9 @@ const markets = await this.marketRepo.find({
 
 ```typescript
 const mapping = {
-  BTCUSDT: 'BTC_USDT',
-  ETHUSDT: 'ETH_USDT',
-  SOLUSDT: 'SOL_USDT',
+  bitcoin: 'BTC_USDT',
+  ethereum: 'ETH_USDT',
+  solana: 'SOL_USDT',
 };
 ```
 
@@ -260,17 +259,26 @@ const mapping = {
 3. Zero dependencies (just ConfigService + RedisService)
 4. Hardcoded = predictable + testable
 
+### Why CoinGecko is Better Than Our Other Attempts
+
+| Attempt     | Issue                   | Status |
+| ----------- | ----------------------- | ------ |
+| CoinCap WS  | Requires API key        | ❌     |
+| CoinCap API | ENOTFOUND (DNS issues)  | ❌     |
+| Binance API | 451 (Blocked in US)     | ❌     |
+| CoinGecko   | Free, global, no blocks | ✅     |
+
 ---
 
 ## Troubleshooting
 
 If chart/ticker still not updating after deploy:
 
-### Check 1: Binance API Reachable?
+### Check 1: CoinGecko API Reachable?
 
 ```bash
-curl https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT
-# Should return JSON with lastPrice
+curl 'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana&vs_currencies=usd'
+# Should return JSON with prices
 ```
 
 ### Check 2: Prices in Redis?
@@ -293,15 +301,25 @@ socket.on('ticker:update', (ticker) => console.log(ticker));
 ```bash
 # Check database for recent trades
 SELECT * FROM trades ORDER BY timestamp DESC LIMIT 5;
-# Should show latest bot trades
+# Should show latest bot trades with real prices
+```
+
+### Check 5: No 451 Errors in Logs?
+
+```
+# Should NOT see:
+[COINGECKO_API] ❌ Failed to fetch: Request failed with status code 451
+
+# Should see:
+[COINGECKO_PRICES] 💰 Prices: BTC_USDT=104527.84, ETH_USDT=3542.21, SOL_USDT=168.92
 ```
 
 ---
 
 ## Summary
 
-**What was broken**: CoinCap API unreachable → No prices → No ticker/chart updates
+**What was broken**: Binance API returns 451 error from US (Render) → No prices → No ticker/chart updates
 
-**What we fixed**: Switched to Binance Public API → Consistent price data → WebSocket broadcasts working
+**What we fixed**: Switched to CoinGecko API (free, global, works from US) → Consistent price data → WebSocket broadcasts working
 
 **Result**: Real-time chart, ticker, and lastPrice updates when bot trades

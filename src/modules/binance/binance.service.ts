@@ -1,24 +1,29 @@
 import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { RedisService } from '../../core/redis/redis.service';
+import { Market, MarketStatus } from '../market/entities/market.entity';
 import axios from 'axios';
 
 @Injectable()
 export class BinanceService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(BinanceService.name);
   private pricePollingInterval: NodeJS.Timeout | null = null;
-  private assetToInternalMap: Map<string, string> = new Map();
+  private symbolToInternalMap: Map<string, string> = new Map();
   private latestPrices: Map<string, number> = new Map();
 
   constructor(
     private configService: ConfigService,
     private redisService: RedisService,
+    @InjectRepository(Market)
+    private marketRepo: Repository<Market>,
   ) {}
 
   onModuleInit() {
     const enabled = this.configService.get<string>('BINANCE_ENABLED', 'true');
     if (enabled === 'true') {
-      this.initializeSymbolMapping();
+      void this.initializeSymbolMapping();
       this.startPricePolling();
     }
   }
@@ -29,39 +34,53 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Initialize mapping from Binance symbols to internal symbols
+   * Fetches active markets from database dynamically
    */
-  private initializeSymbolMapping(): void {
-    // Map Binance symbols to internal symbols
-    const mapping: Record<string, string> = {
-      BTCUSDT: 'BTC_USDT',
-      ETHUSDT: 'ETH_USDT',
-      SOLUSDT: 'SOL_USDT',
-    };
+  private async initializeSymbolMapping(): Promise<void> {
+    try {
+      // Fetch all active markets from database
+      const markets = await this.marketRepo.find({
+        where: { status: MarketStatus.ACTIVE },
+      });
 
-    for (const [binanceSymbol, internalSymbol] of Object.entries(mapping)) {
-      this.assetToInternalMap.set(binanceSymbol, internalSymbol);
+      if (markets.length === 0) {
+        this.logger.warn('[BINANCE_US_INIT] ⚠️ No active markets found in database');
+        return;
+      }
+
+      // Map Binance symbols to internal symbols based on market symbol
+      // Example: BTC_USDT -> BTCUSDT (Binance format)
+      for (const market of markets) {
+        const binanceSymbol = market.symbol.replace('_', '').toUpperCase();
+        this.symbolToInternalMap.set(binanceSymbol, market.symbol);
+        this.logger.debug(`[BINANCE_US_INIT] Mapped ${binanceSymbol} → ${market.symbol}`);
+      }
+
+      const mapSize = this.symbolToInternalMap.size;
+      this.logger.log(`[BINANCE_US_INIT] ✅ Symbol mapping initialized with ${mapSize} markets`);
+    } catch (error) {
+      const msg = (error as Error).message;
+      this.logger.error(`[BINANCE_US_INIT] ❌ Failed to initialize: ${msg}`);
     }
-
-    this.logger.log('[BINANCE_INIT] ✅ Symbol mapping initialized');
   }
 
   /**
-   * Start polling Binance Public API for prices
-   * Binance API is free, public, no authentication required
-   * Using ticker/24hr endpoint which is fast and reliable
+   * Start polling Binance US API for prices
+   * Binance US: api.binance.us (free, no geoblocking, supports US)
+   * Rate limit: 1200 requests per minute (20/second) - very generous
    */
   private startPricePolling(): void {
-    this.logger.log('[PRICE_POLLING] 🚀 Starting Binance Public API polling...');
+    this.logger.log('[PRICE_POLLING] 🚀 Starting Binance US API polling...');
 
     // Initial fetch
-    void this.fetchPricesFromBinance();
+    void this.fetchPricesFromBinanceUS();
 
-    // Poll every 2 seconds
+    // Poll every 5 seconds (safe, fast updates for candles)
     this.pricePollingInterval = setInterval(() => {
-      void this.fetchPricesFromBinance();
-    }, 2000);
+      void this.fetchPricesFromBinanceUS();
+    }, 5000);
 
-    this.logger.log('[PRICE_POLLING] ✅ Price polling started (2s interval)');
+    this.logger.log('[PRICE_POLLING] ✅ Price polling started (5s interval)');
   }
 
   private stopPricePolling(): void {
@@ -73,56 +92,51 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Fetch prices from Binance Public API
-   * Binance 24hr ticker endpoint returns current price and 24h data
-   * No API key required, free tier allows thousands of requests per minute
+   * Fetch prices from Binance US API
+   * Binance US endpoint: https://api.binance.us (no geoblocking)
+   * Free tier: 1200 requests/minute (very generous)
+   * Endpoint: /api/v3/ticker/price?symbols=["BTCUSDT","ETHUSDT",...]
    */
-  private async fetchPricesFromBinance(): Promise<void> {
+  private async fetchPricesFromBinanceUS(): Promise<void> {
     try {
       // Get symbols we need to fetch
-      const symbolsNeeded = Array.from(this.assetToInternalMap.keys());
+      const symbolsNeeded = Array.from(this.symbolToInternalMap.keys());
       if (symbolsNeeded.length === 0) return;
 
       const prices: Map<string, number> = new Map();
 
-      // Fetch prices for each symbol from Binance
-      for (const binanceSymbol of symbolsNeeded) {
-        try {
-          const url = `https://api.binance.com/api/v3/ticker/24hr?symbol=${binanceSymbol}`;
-          this.logger.debug(`[BINANCE_API] 📡 Fetching from: ${url}`);
+      // Batch request - fetch all prices in one call
+      const symbolsParam = JSON.stringify(symbolsNeeded);
+      const url = `https://api.binance.us/api/v3/ticker/price?symbols=${encodeURIComponent(symbolsParam)}`;
 
-          const response = await axios.get(url, { timeout: 5000 });
+      this.logger.debug(`[BINANCE_US_API] 📡 Fetching from: ${url.substring(0, 80)}...`);
 
-          if (response.status !== 200) {
-            this.logger.error(
-              `[BINANCE_API] ❌ HTTP Error ${response.status}: ${response.statusText}`,
-            );
-            continue;
-          }
+      const response = await axios.get(url, { timeout: 5000 });
 
-          const data = response.data as { symbol: string; lastPrice: string };
-          if (!data.lastPrice) {
-            this.logger.warn(`[BINANCE_API] ⚠️ No price data in response for ${binanceSymbol}`);
-            continue;
-          }
+      if (response.status !== 200) {
+        this.logger.error(
+          `[BINANCE_US_API] ❌ HTTP Error ${response.status}: ${response.statusText}`,
+        );
+        return;
+      }
 
-          const price = parseFloat(data.lastPrice);
-          if (isNaN(price) || price <= 0) {
-            this.logger.warn(
-              `[BINANCE_API] ⚠️ Invalid price for ${binanceSymbol}: ${data.lastPrice}`,
-            );
-            continue;
-          }
+      const data = response.data as Array<{ symbol: string; price: string }>;
+      if (!Array.isArray(data) || data.length === 0) {
+        this.logger.warn('[BINANCE_US_API] ⚠️ No price data received');
+        return;
+      }
 
-          prices.set(binanceSymbol, price);
-        } catch (error) {
-          const msg = (error as Error).message;
-          this.logger.error(`[BINANCE_API] ❌ Failed to fetch ${binanceSymbol}: ${msg}`);
-          if (error instanceof axios.AxiosError) {
-            this.logger.debug(`[BINANCE_API] Error Code: ${error.code}`);
-            this.logger.debug(`[BINANCE_API] Status: ${error.response?.status}`);
-          }
+      // Process prices from response
+      for (const item of data) {
+        const binanceSymbol = item.symbol;
+        const price = parseFloat(item.price);
+
+        if (isNaN(price) || price <= 0) {
+          this.logger.warn(`[BINANCE_US_API] ⚠️ Invalid price for ${binanceSymbol}: ${item.price}`);
+          continue;
         }
+
+        prices.set(binanceSymbol, price);
       }
 
       // Process prices and update Redis
@@ -132,7 +146,12 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
       }
     } catch (error) {
       const msg = (error as Error).message;
-      this.logger.error(`[BINANCE_API] ❌ Unexpected error fetching prices: ${msg}`);
+      this.logger.error(`[BINANCE_US_API] ❌ Failed to fetch prices: ${msg}`);
+      if (error instanceof axios.AxiosError) {
+        this.logger.debug(`[BINANCE_US_API] Error Code: ${error.code}`);
+        this.logger.debug(`[BINANCE_US_API] Status: ${error.response?.status}`);
+        this.logger.debug(`[BINANCE_US_API] URL: ${error.config?.url}`);
+      }
     }
   }
 
@@ -143,7 +162,7 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
     const processedPrices: string[] = [];
 
     for (const [binanceSymbol, price] of prices) {
-      const internalSymbol = this.assetToInternalMap.get(binanceSymbol);
+      const internalSymbol = this.symbolToInternalMap.get(binanceSymbol);
       if (!internalSymbol) continue;
 
       this.latestPrices.set(internalSymbol, price);
@@ -152,7 +171,7 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
 
     if (processedPrices.length > 0) {
       const msg = processedPrices.join(', ');
-      this.logger.log(`[BINANCE_PRICES] 💰 Prices: ${msg}`);
+      this.logger.log(`[BINANCE_US_PRICES] 💰 Prices: ${msg}`);
     }
   }
 
