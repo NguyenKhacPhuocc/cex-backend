@@ -1,11 +1,4 @@
-import {
-  Global,
-  Inject,
-  Logger,
-  Module,
-  OnModuleDestroy,
-  Provider,
-} from '@nestjs/common';
+import { Global, Inject, Logger, Module, OnModuleDestroy, Provider } from '@nestjs/common';
 import { Redis } from 'ioredis';
 import { RedisService } from './redis.service';
 import { RedisPubSub } from './redis.pubsub';

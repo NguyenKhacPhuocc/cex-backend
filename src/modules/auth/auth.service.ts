@@ -2,11 +2,7 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
-import {
-  Injectable,
-  BadRequestException,
-  UnauthorizedException,
-} from '@nestjs/common';
+import { Injectable, BadRequestException, UnauthorizedException } from '@nestjs/common';
 import { LoginUserDto } from '../users/dtos/login-user.dto';
 import { RegisterUserDto } from '../users/dtos/register-user.dto';
 import { UserService } from '../users/users.service';
@@ -43,9 +39,7 @@ export class AuthService {
     });
   }
 
-  async register(
-    dto: RegisterUserDto,
-  ): Promise<{ message: string; user: Partial<User> }> {
+  async register(dto: RegisterUserDto): Promise<{ message: string; user: Partial<User> }> {
     const existing = await this.userService.findByEmail(dto.email);
     if (existing) throw new BadRequestException('Email already registered');
 
@@ -71,12 +65,10 @@ export class AuthService {
     refreshToken: string;
   }> {
     const user = await this.userService.findByEmail(dto.email);
-    if (!user)
-      throw new UnauthorizedException('Email hoặc mật khẩu không đúng');
+    if (!user) throw new UnauthorizedException('Email hoặc mật khẩu không đúng');
 
     const match = await bcrypt.compare(dto.password, user.passwordHash);
-    if (!match)
-      throw new UnauthorizedException('Email hoặc mật khẩu không đúng');
+    if (!match) throw new UnauthorizedException('Email hoặc mật khẩu không đúng');
 
     const accessToken = this.generateAccessToken(user);
     const refreshToken = this.generateRefreshToken(user);
@@ -92,9 +84,7 @@ export class AuthService {
     };
   }
 
-  async refreshAccessToken(
-    refreshToken: string,
-  ): Promise<{ accessToken: string }> {
+  async refreshAccessToken(refreshToken: string): Promise<{ accessToken: string }> {
     try {
       const payload = this.jwtService.verify(refreshToken, {
         secret: process.env.JWT_REFRESH_SECRET,

@@ -14,6 +14,7 @@ import { Logger, forwardRef, Inject } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { OrderBookService } from '../../modules/trading/order-book.service';
 import { MarketService } from '../../modules/market/market.service';
+import { Candle } from '../../modules/candles/entities/candle.entity';
 
 @WebSocketGateway({
   cors: {
@@ -32,6 +33,7 @@ export class TradingWebSocketGateway
   private userSockets: Map<string, Set<string>> = new Map(); // userId -> Set of socketIds
   private orderbookSubscriptions: Map<string, Set<string>> = new Map(); // symbol -> Set of socketIds
   private tickerSubscriptions: Map<string, Set<string>> = new Map(); // symbol -> Set of socketIds
+  private candleSubscriptions: Map<string, Set<string>> = new Map(); // `${symbol}:${timeframe}` -> Set of socketIds
 
   constructor(
     private jwtService: JwtService,
@@ -39,15 +41,9 @@ export class TradingWebSocketGateway
     private orderBookService: OrderBookService,
     @Inject(forwardRef(() => MarketService))
     private marketService: MarketService,
-  ) {
-    this.logger.log('🚀 TradingWebSocketGateway CONSTRUCTOR called');
-  }
+  ) {}
 
-  afterInit() {
-    this.logger.log('✅ TradingWebSocketGateway initialized successfully!');
-    this.logger.log(`📡 Listening on namespace: /trading`);
-    this.logger.log(`🌐 Ready to accept WebSocket connections`);
-  }
+  afterInit() {}
 
   async handleConnection(client: Socket) {
     try {
@@ -69,9 +65,8 @@ export class TradingWebSocketGateway
         }
       }
 
-      // ✅ Allow anonymous connections for public market data (ticker, orderbook)
+      // Allow anonymous connections for public market data (ticker, orderbook)
       if (!token) {
-        this.logger.log(`✅ Client ${client.id} connected anonymously (public market data only)`);
         // Mark as anonymous
         client.data.userId = null;
         client.data.isAuthenticated = false;
@@ -101,15 +96,11 @@ export class TradingWebSocketGateway
         // Join user's personal room
         await client.join(`user:${userId}`);
 
-        this.logger.log(
-          `✅ Client ${client.id} connected (User: ${userId}, Total sockets: ${this.userSockets.get(userId)!.size})`,
-        );
-
         // Send confirmation with userId
         client.emit('connected', { userId, socketId: client.id });
       } catch {
         // Token invalid - allow as anonymous
-        this.logger.warn(`⚠️ Invalid token for client ${client.id}, allowing anonymous connection`);
+        this.logger.warn(`Invalid token for client ${client.id}, allowing anonymous connection`);
         client.data.userId = null;
         client.data.isAuthenticated = false;
         client.emit('connected', { socketId: client.id });
@@ -117,7 +108,7 @@ export class TradingWebSocketGateway
     } catch (error) {
       // Allow connection even on error (public data)
       this.logger.warn(
-        `⚠️ Connection error for client ${client.id}, allowing anonymous:`,
+        `Connection error for client ${client.id}, allowing anonymous:`,
         error instanceof Error ? error.message : String(error),
       );
       client.data.userId = null;
@@ -135,12 +126,6 @@ export class TradingWebSocketGateway
       if (this.userSockets.get(userId)!.size === 0) {
         this.userSockets.delete(userId);
       }
-
-      this.logger.log(
-        `❌ Client ${client.id} disconnected (User: ${userId}, Remaining: ${this.userSockets.get(userId)?.size || 0})`,
-      );
-    } else {
-      this.logger.log(`❌ Client ${client.id} disconnected (No userId)`);
     }
   }
 
@@ -155,24 +140,19 @@ export class TradingWebSocketGateway
       userId,
       timestamp: Date.now(),
     });
-
-    this.logger.log(
-      `📡 Emitted balance:updated to user ${userId} (sockets: ${this.userSockets.get(userId)?.size || 0})`,
-    );
   }
 
   // Emit order update to specific user
   emitOrderUpdate(userId: string, orderId: string, status: string) {
+    // Convert status to UPPERCASE for frontend consistency
+    const statusUpperCase = status.toUpperCase();
+
     this.server.to(`user:${userId}`).emit('order:updated', {
       userId,
       orderId,
-      status,
+      status: statusUpperCase,
       timestamp: Date.now(),
     });
-
-    this.logger.log(
-      `📡 Emitted order:updated to user ${userId} (order: ${orderId}, status: ${status})`,
-    );
   }
 
   // Emit trade execution to both buyer and seller
@@ -187,31 +167,27 @@ export class TradingWebSocketGateway
   }) {
     const { tradeId, buyerId, sellerId, symbol, price, amount, takerSide } = tradeData;
 
-    // Notify buyer
+    // Notify buyer (always BUY side)
     this.server.to(`user:${buyerId}`).emit('trade:executed', {
       tradeId,
       userId: buyerId,
-      side: 'buy',
+      side: 'BUY',
       symbol,
       price,
       amount,
       timestamp: Date.now(),
     });
 
-    // Notify seller
+    // Notify seller (always SELL side)
     this.server.to(`user:${sellerId}`).emit('trade:executed', {
       tradeId,
       userId: sellerId,
-      side: 'sell',
+      side: 'SELL',
       symbol,
       price,
       amount,
       timestamp: Date.now(),
     });
-
-    this.logger.log(
-      `📡 Emitted trade:executed to buyer ${buyerId} and seller ${sellerId} (trade: ${tradeId})`,
-    );
 
     // Also broadcast to all orderbook subscribers (public market trade)
     this.broadcastMarketTrade(symbol, {
@@ -228,7 +204,7 @@ export class TradingWebSocketGateway
     });
   }
 
-  // Broadcast market trade to all subscribers (public)
+  // Broadcast market trade to all connected clients (public)
   broadcastMarketTrade(
     symbol: string,
     trade: {
@@ -239,22 +215,13 @@ export class TradingWebSocketGateway
       timestamp: Date;
     },
   ) {
-    const subscribers = this.orderbookSubscriptions.get(symbol);
-
-    if (!subscribers || subscribers.size === 0) {
-      return;
-    }
-
-    // Emit to all subscribers
-    subscribers.forEach((socketId) => {
-      this.server.to(socketId).emit('trade:new', {
-        symbol,
-        ...trade,
-        total: (trade.price * trade.amount).toFixed(8),
-      });
-    });
-
-    this.logger.log(`💹 Broadcasted market trade for ${symbol} to ${subscribers.size} clients`);
+    // Broadcast to all connected clients (public market data)
+    const broadcastData = {
+      symbol,
+      ...trade,
+      total: (trade.price * trade.amount).toFixed(8),
+    };
+    this.server.emit('trade:new', broadcastData);
   }
 
   // Get connected users count
@@ -284,13 +251,10 @@ export class TradingWebSocketGateway
     }
     this.orderbookSubscriptions.get(symbol)!.add(client.id);
 
-    this.logger.log(`📊 Client ${client.id} subscribed to orderbook: ${symbol}`);
-
     // Send initial snapshot
     try {
       const snapshot = await this.orderBookService.getOrderBookSnapshot(symbol, 20);
       client.emit('orderbook:snapshot', snapshot);
-      this.logger.log(`📸 Sent orderbook snapshot to ${client.id} for ${symbol}`);
     } catch (error) {
       this.logger.error(`Error fetching orderbook snapshot for ${symbol}:`, error);
       client.emit('orderbook:error', {
@@ -313,8 +277,6 @@ export class TradingWebSocketGateway
         this.orderbookSubscriptions.delete(symbol);
       }
     }
-
-    this.logger.log(`Client ${client.id} unsubscribed from orderbook: ${symbol}`);
   }
 
   // Broadcast orderbook update to all subscribers of a symbol
@@ -332,10 +294,6 @@ export class TradingWebSocketGateway
       subscribers.forEach((socketId) => {
         this.server.to(socketId).emit('orderbook:update', snapshot);
       });
-
-      this.logger.log(
-        `🔄 Broadcasted orderbook update for ${symbol} to ${subscribers.size} clients`,
-      );
     } catch (error) {
       this.logger.error(`Error broadcasting orderbook update for ${symbol}:`, error);
     }
@@ -353,16 +311,6 @@ export class TradingWebSocketGateway
 
       // Broadcast to all subscribers and all connected clients (public market data)
       this.server.emit('ticker:update', ticker);
-
-      // Also emit to specific subscribers if any
-      const subscribers = this.tickerSubscriptions.get(symbol);
-      if (subscribers && subscribers.size > 0) {
-        subscribers.forEach((socketId) => {
-          this.server.to(socketId).emit('ticker:update', ticker);
-        });
-      }
-
-      this.logger.log(`📈 Broadcasted ticker:update for ${symbol} to all clients`);
     } catch (error) {
       this.logger.error(`Error broadcasting ticker update for ${symbol}:`, error);
     }
@@ -386,15 +334,12 @@ export class TradingWebSocketGateway
     }
     this.tickerSubscriptions.get(symbol)!.add(client.id);
 
-    this.logger.log(`📈 Client ${client.id} subscribed to ticker: ${symbol}`);
-
     // Send initial snapshot
     try {
       const ticker = await this.marketService.getTickerBySymbol(symbol);
 
       if (ticker) {
         client.emit('ticker:snapshot', ticker);
-        this.logger.log(`📸 Sent ticker snapshot to ${client.id} for ${symbol}`);
       } else {
         client.emit('ticker:error', {
           message: `Ticker not found for symbol: ${symbol}`,
@@ -422,7 +367,64 @@ export class TradingWebSocketGateway
         this.tickerSubscriptions.delete(symbol);
       }
     }
+  }
 
-    this.logger.log(`Client ${client.id} unsubscribed from ticker: ${symbol}`);
+  // ========== Candle Subscription Handlers ==========
+
+  @SubscribeMessage('candle:subscribe')
+  handleCandleSubscribe(client: Socket, payload: { symbol: string; timeframe: string }): void {
+    const { symbol, timeframe } = payload;
+
+    if (!symbol || !timeframe) {
+      this.logger.warn(`Client ${client.id} tried to subscribe without symbol or timeframe`);
+      return;
+    }
+
+    const key = `${symbol}:${timeframe}`;
+    if (!this.candleSubscriptions.has(key)) {
+      this.candleSubscriptions.set(key, new Set());
+    }
+
+    this.candleSubscriptions.get(key)?.add(client.id);
+  }
+
+  @SubscribeMessage('candle:unsubscribe')
+  handleCandleUnsubscribe(client: Socket, payload: { symbol: string; timeframe: string }): void {
+    const { symbol, timeframe } = payload;
+
+    if (!symbol || !timeframe) {
+      return;
+    }
+
+    const key = `${symbol}:${timeframe}`;
+    this.candleSubscriptions.get(key)?.delete(client.id);
+
+    if (this.candleSubscriptions.get(key)?.size === 0) {
+      this.candleSubscriptions.delete(key);
+    }
+  }
+
+  // Broadcast candle update to all subscribers
+  broadcastCandleUpdate(symbol: string, timeframe: string, candle: Candle): void {
+    const key = `${symbol}:${timeframe}`;
+    const subscribers = this.candleSubscriptions.get(key);
+
+    if (!subscribers || subscribers.size === 0) {
+      return;
+    }
+
+    // Convert candle to format expected by lightweight-charts (Unix timestamp in seconds)
+    const candleData = {
+      time: Math.floor(candle.timestamp.getTime() / 1000),
+      open: Number(candle.open),
+      high: Number(candle.high),
+      low: Number(candle.low),
+      close: Number(candle.close),
+      volume: Number(candle.volume),
+    };
+
+    subscribers.forEach((socketId) => {
+      this.server.to(socketId).emit('candle:update', candleData);
+    });
   }
 }

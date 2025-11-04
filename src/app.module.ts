@@ -18,9 +18,12 @@ import { TradingModule } from './modules/trading/trading.module';
 import { MatchingEngineModule } from './modules/matching-engine/matching-engine.module';
 import { TradesModule } from './modules/trades/trades.module';
 import { DevModule } from './modules/dev/dev.module';
+import { CandlesModule } from './modules/candles/candles.module';
+import { BinanceModule } from './modules/binance/binance.module';
+import { BotModule } from './modules/bot/bot.module';
 import { ThrottlerModule } from '@nestjs/throttler';
-import { APP_GUARD } from '@nestjs/core';
-import { CustomThrottlerGuard } from './common/guards/custom-throttler.guard';
+// import { APP_GUARD } from '@nestjs/core';
+// import { CustomThrottlerGuard } from './common/guards/custom-throttler.guard';
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -57,15 +60,18 @@ import { CustomThrottlerGuard } from './common/guards/custom-throttler.guard';
     MatchingEngineModule,
     TradesModule,
     DevModule,
+    CandlesModule,
+    BinanceModule,
+    BotModule,
   ],
   controllers: [AppController],
   providers: [
     AppService,
     // Apply custom throttler globally with smart skipping for balance endpoints
-    {
-      provide: APP_GUARD,
-      useClass: CustomThrottlerGuard,
-    },
+    // {
+    //   provide: APP_GUARD,
+    //   useClass: CustomThrottlerGuard,
+    // },
   ],
 })
 export class AppModule {}

@@ -10,6 +10,8 @@ import {
   NotFoundException,
   OnModuleInit,
   Logger,
+  Inject,
+  forwardRef,
 } from '@nestjs/common';
 import { RedisPubSub } from 'src/core/redis/redis.pubsub';
 import { Order } from './entities/order.entity';
@@ -17,13 +19,14 @@ import { User } from '../users/entities/user.entity';
 import { MarketService } from '../market/market.service';
 import { CreateOrderDto } from './dtos/create-order.dto';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Not, Repository } from 'typeorm';
+import { DataSource, In, Not, Repository } from 'typeorm';
 import { OrderBookCacheService } from 'src/core/redis/orderbook-cache.service';
 import { Wallet, WalletType } from '../wallets/entities/wallet.entity';
 import { OrderQueueService } from 'src/core/redis/order-queue.service';
-import { OrderSide, OrderStatus } from 'src/shared/enums';
+import { OrderSide, OrderStatus, OrderType } from 'src/shared/enums';
 import { RedisService } from 'src/core/redis/redis.service';
 import { REDIS_KEYS } from 'src/common/constants/redis-keys';
+import { TradingWebSocketGateway } from 'src/core/websocket/websocket.gateway';
 
 @Injectable()
 export class OrderService implements OnModuleInit {
@@ -40,25 +43,35 @@ export class OrderService implements OnModuleInit {
     private orderRepo: Repository<Order>,
     @InjectRepository(Wallet)
     private walletRepo: Repository<Wallet>,
+    @Inject(forwardRef(() => TradingWebSocketGateway))
+    private readonly wsGateway: TradingWebSocketGateway,
   ) {}
 
   onModuleInit() {
-    this.logger.log(`[OrderService] Subscribing to channel: ${REDIS_KEYS.ORDER_UPDATE_CHANNEL}`);
     this.redisPubSub.subscribe(REDIS_KEYS.ORDER_UPDATE_CHANNEL); // đăng ký kênh lắng nghe cập nhật lệnh
     this.redisPubSub.onMessage(async (channel, message) => {
       if (channel === REDIS_KEYS.ORDER_UPDATE_CHANNEL) {
         const userId = message.userId;
-        this.logger.log(`[OrderService] Received message for userId: ${userId}`);
         const redisKey = REDIS_KEYS.USER_OPEN_ORDERS(userId);
-        this.logger.log(`[OrderService] Attempting to delete cache key: ${redisKey}`);
-        const deleteResult = await this.redisService.del(redisKey);
-        this.logger.log(`[OrderService] Deleted cache key: ${redisKey}, Result: ${deleteResult}`);
+        await this.redisService.del(redisKey);
       }
     });
   }
 
   async createOrder(user: User, createOrderDto: CreateOrderDto): Promise<Order> {
     const { side, type, price, amount, marketSymbol } = createOrderDto;
+
+    // Validate price is required for LIMIT orders
+    if (type === OrderType.LIMIT && (!price || price <= 0)) {
+      throw new BadRequestException(
+        'Price is required and must be greater than 0 for LIMIT orders',
+      );
+    }
+
+    // Validate amount
+    if (!amount || amount <= 0) {
+      throw new BadRequestException('Amount must be greater than 0');
+    }
 
     const market = await this.marketService.findBySymbol(marketSymbol);
     if (!market) {
@@ -97,7 +110,15 @@ export class OrderService implements OnModuleInit {
         status: OrderStatus.OPEN,
       });
       const savedOrder = await this.orderRepo.save(order);
-      await this.orderQueue.enqueue(market.symbol, savedOrder);
+
+      // Ensure market data is included when enqueuing
+      // TypeORM might not return the full market relation, so we explicitly include it
+      const orderWithMarket = {
+        ...savedOrder,
+        market: market,
+        user: { id: user.id },
+      };
+      await this.orderQueue.enqueue(market.symbol, orderWithMarket as any);
 
       // Publish message to invalidate cache for user's open orders
       await this.redisPubSub.publish(REDIS_KEYS.ORDER_UPDATE_CHANNEL, {
@@ -119,31 +140,19 @@ export class OrderService implements OnModuleInit {
     const cachedOrders = await this.redisService.get(redisKey);
 
     if (cachedOrders) {
-      this.logger.log(`[OrderService] Cache HIT for user ${user.id}, key: ${redisKey}`);
       return JSON.parse(cachedOrders);
     }
-
-    this.logger.log(
-      `[OrderService] Cache MISS for user ${user.id}, key: ${redisKey}. Fetching from DB.`,
-    );
     const dbOrders = await this.orderRepo.find({
       where: {
         user: { id: user.id },
-        status: OrderStatus.OPEN,
+        status: In([OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED]),
       },
       relations: ['market'], // nếu muốn lấy thêm thông tin market
       order: { createdAt: 'DESC' },
     });
 
-    this.logger.log(
-      `[OrderService] Fetched ${dbOrders.length} orders from DB for user ${user.id}. Orders: ${JSON.stringify(dbOrders.map((o) => ({ id: o.id, status: o.status })))}`,
-    );
-
     // Cache the result in Redis with a TTL (e.g., 5 minutes)
     await this.redisService.set(redisKey, JSON.stringify(dbOrders), 300);
-    this.logger.log(
-      `[OrderService] Cached ${dbOrders.length} orders for user ${user.id}, key: ${redisKey}`,
-    );
 
     return dbOrders;
   }
@@ -152,7 +161,7 @@ export class OrderService implements OnModuleInit {
     const orders = await this.orderRepo.find({
       where: {
         user: { id: user.id },
-        status: Not(OrderStatus.OPEN),
+        status: Not(In([OrderStatus.OPEN])),
       },
       relations: ['market'], // nếu muốn lấy thêm thông tin market
       order: { createdAt: 'DESC' },
@@ -216,10 +225,83 @@ export class OrderService implements OnModuleInit {
       userId: user.id,
     });
 
+    // Emit WebSocket event to notify user about order cancellation
+    this.wsGateway.emitOrderUpdate(String(user.id), orderId, OrderStatus.CANCELED);
+
     return {
       code: 'success',
       message: `Order ${orderId} canceled successfully.`,
     };
+  }
+
+  async cancelOrdersBySymbolAndSide(user: User, symbol: string, side: OrderSide): Promise<number> {
+    const market = await this.marketService.findBySymbol(symbol);
+    if (!market) {
+      return 0;
+    }
+
+    const openOrders = await this.orderRepo.find({
+      where: {
+        user: { id: user.id },
+        status: OrderStatus.OPEN,
+        side,
+        market: { id: market.id },
+      },
+      relations: ['market'],
+    });
+
+    if (openOrders.length === 0) {
+      return 0;
+    }
+
+    await this.dataSource.transaction(async (manager) => {
+      const amountsToUnlock = new Map<string, number>();
+
+      for (const order of openOrders) {
+        await this.redisPubSub.publish(REDIS_KEYS.ORDER_CANCEL_CHANNEL, order);
+        order.status = OrderStatus.CANCELED;
+
+        const remainingAmount = order.amount - order.filled;
+        if (remainingAmount <= 0) continue;
+
+        const amount =
+          order.side === OrderSide.BUY ? (order.price || 0) * remainingAmount : remainingAmount;
+        const currency =
+          order.side === OrderSide.BUY ? order.market.quoteAsset : order.market.baseAsset;
+
+        amountsToUnlock.set(currency, (amountsToUnlock.get(currency) || 0) + amount);
+      }
+
+      for (const [currency, amount] of amountsToUnlock.entries()) {
+        if (amount <= 0) continue;
+        const wallet = await manager.findOne(Wallet, {
+          where: {
+            user: { id: user.id },
+            currency,
+            walletType: WalletType.SPOT,
+          },
+        });
+
+        if (wallet) {
+          wallet.available = Number(wallet.available) + amount;
+          wallet.frozen = Number(wallet.frozen) - amount;
+          await manager.save(wallet);
+        }
+      }
+
+      await manager.save(openOrders);
+    });
+
+    await this.redisPubSub.publish(REDIS_KEYS.ORDER_UPDATE_CHANNEL, {
+      userId: user.id,
+    });
+
+    // Emit WebSocket events for each canceled order
+    for (const order of openOrders) {
+      this.wsGateway.emitOrderUpdate(String(user.id), order.id, OrderStatus.CANCELED);
+    }
+
+    return openOrders.length;
   }
 
   async cancelAllOrders(user: User) {
@@ -276,6 +358,11 @@ export class OrderService implements OnModuleInit {
     await this.redisPubSub.publish(REDIS_KEYS.ORDER_UPDATE_CHANNEL, {
       userId: user.id,
     });
+
+    // Emit WebSocket events for each canceled order
+    for (const order of openOrders) {
+      this.wsGateway.emitOrderUpdate(String(user.id), order.id, OrderStatus.CANCELED);
+    }
 
     return {
       code: 'success',

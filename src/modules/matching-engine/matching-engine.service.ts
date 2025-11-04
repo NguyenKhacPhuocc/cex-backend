@@ -20,6 +20,8 @@ import {
 } from '../transactions/entities/transaction.entity';
 import { LedgerEntry, LedgerReferenceType } from '../ledger/entities/ledger.entity';
 import { TradingWebSocketGateway } from 'src/core/websocket/websocket.gateway';
+import { CandlesService } from '../candles/candles.service';
+import { Timeframe } from '../candles/entities/candle.entity';
 
 @Injectable()
 export class MatchingEngineService implements OnModuleInit {
@@ -30,6 +32,7 @@ export class MatchingEngineService implements OnModuleInit {
     private readonly redisService: RedisService,
     private readonly redisPubSub: RedisPubSub,
     private readonly wsGateway: TradingWebSocketGateway,
+    private readonly candlesService: CandlesService,
     @InjectRepository(Order)
     private orderRepo: Repository<Order>,
     @InjectRepository(User)
@@ -56,13 +59,57 @@ export class MatchingEngineService implements OnModuleInit {
   }
 
   async handleCancelOrder(order: Order) {
-    this.logger.log(`Canceling order: ${order.id}`);
     await this.orderBookService.remove(order);
   }
 
-  async processOrder(order: Order): Promise<void> {
-    this.logger.log(`Processing order: ${order.id}`);
+  /**
+   * Check for self-trade and cancel the existing conflicting order to prevent crossed book
+   * Similar to real exchanges like Binance
+   */
+  private async checkAndCancelSelfTrade(newOrder: Order): Promise<void> {
+    // Only check for LIMIT orders with specific prices
+    if (newOrder.type !== OrderType.LIMIT || !newOrder.price) {
+      return;
+    }
 
+    const oppositeSide = newOrder.side === OrderSide.BUY ? OrderSide.SELL : OrderSide.BUY;
+    const bestMatch = await this.orderBookService.getBest(newOrder.market.symbol, oppositeSide);
+
+    if (!bestMatch) {
+      return; // No conflict
+    }
+
+    // Check if best match is from the same user
+    if (bestMatch.user.id !== newOrder.user.id) {
+      return; // Different users, no self-trade
+    }
+
+    // Check if prices would cross
+    const wouldCross =
+      newOrder.side === OrderSide.BUY
+        ? Number(newOrder.price) >= Number(bestMatch.price)
+        : Number(newOrder.price) <= Number(bestMatch.price);
+
+    if (wouldCross) {
+      // Cancel the existing order to prevent self-trade
+      // Remove from order book
+      await this.orderBookService.remove(bestMatch);
+
+      // Update status in database
+      bestMatch.status = OrderStatus.CANCELED;
+      await this.orderRepo.save(bestMatch);
+
+      // Emit WebSocket event to notify user
+      this.wsGateway.emitOrderUpdate(String(newOrder.user.id), bestMatch.id, OrderStatus.CANCELED);
+
+      // Publish cache invalidation
+      await this.redisPubSub.publish(REDIS_KEYS.ORDER_UPDATE_CHANNEL, {
+        userId: newOrder.user.id,
+      });
+    }
+  }
+
+  async processOrder(order: Order): Promise<void> {
     // Eagerly load full User and Market entities for the order
     const fullUser = await this.userRepo.findOne({
       where: { id: order.user.id },
@@ -72,14 +119,21 @@ export class MatchingEngineService implements OnModuleInit {
     });
 
     if (!fullUser || !fullMarket) {
+      // If user or market not found, order cannot be processed
+      // This should not happen in normal flow, but handle gracefully
       this.logger.error(
-        `Failed to load full user or market for order ${order.id}. Skipping processing.`,
+        `Cannot process order ${order.id}: ${!fullUser ? 'User not found' : ''} ${!fullMarket ? 'Market not found' : ''}`,
       );
       return;
     }
 
     order.user = fullUser;
     order.market = fullMarket;
+
+    // ⭐ Early self-trade prevention: Check and cancel conflicting order before matching
+    // This only cancels existing orders from the same user if they would cross
+    // It does NOT prevent the new order from being added to orderbook
+    await this.checkAndCancelSelfTrade(order);
 
     let remainingAmount = order.amount;
 
@@ -115,18 +169,15 @@ export class MatchingEngineService implements OnModuleInit {
     });
 
     await this.orderRepo.save(newOrderEntity);
-    this.logger.log(
-      `[MatchingEngineService] Order ${newOrderEntity.id} saved to DB with status ${newOrderEntity.status}. User ID: ${order.user.id}`,
-    );
 
     // Publish message to invalidate cache for the user of the processed order
     const takerUserId = order.user.id;
     await this.redisPubSub.publish(REDIS_KEYS.ORDER_UPDATE_CHANNEL, {
       userId: takerUserId,
     });
-    this.logger.log(
-      `[MatchingEngineService] Published cache invalidation message for taker user ${takerUserId} for order ${newOrderEntity.id}`,
-    );
+
+    // Emit WebSocket event to notify user about order status update
+    this.wsGateway.emitOrderUpdate(String(takerUserId), newOrderEntity.id, newOrderEntity.status);
 
     // Broadcast orderbook update to all subscribers
     await this.wsGateway.broadcastOrderBookUpdate(order.market.symbol);
@@ -135,8 +186,12 @@ export class MatchingEngineService implements OnModuleInit {
   private async processLimitOrder(order: Order): Promise<number> {
     const oppositeSide = order.side === OrderSide.BUY ? OrderSide.SELL : OrderSide.BUY;
     let remainingAmount = order.amount;
+    const maxIterations = 100; // Prevent infinite loops
+    let iterations = 0;
 
-    while (remainingAmount > 0) {
+    while (remainingAmount > 0 && iterations < maxIterations) {
+      iterations++;
+
       // tìm kiếm order tốt nhất từ bên đối diện
       const bestMatch = await this.orderBookService.getBest(order.market.symbol, oppositeSide);
 
@@ -145,13 +200,14 @@ export class MatchingEngineService implements OnModuleInit {
       }
 
       // Prevent self-matching (self-trade prevention)
-      // Skip this order but keep it in orderbook for other users to match
+      // Note: Different bots are different users, so they can trade with each other
+      // This only prevents the same user from matching with themselves
       if (bestMatch.user.id === order.user.id) {
-        this.logger.log(
-          `Self-trade prevention: Skipping order ${bestMatch.id} (same user ${order.user.id})`,
+        // Skip this match - break the loop to avoid infinite self-trade checking
+        // The existing order will remain in the orderbook
+        this.logger.debug(
+          `Self-trade prevention: skipping match for user ${order.user.id}, order ${order.id} vs ${bestMatch.id}`,
         );
-        // Do NOT remove - just break to stop matching
-        // Both orders will remain in orderbook for other users
         break;
       }
 
@@ -161,7 +217,7 @@ export class MatchingEngineService implements OnModuleInit {
           : Number(order.price) <= Number(bestMatch.price);
 
       if (!canMatch) {
-        break; // Price does not match
+        break; // Price does not match - no more matches possible
       }
 
       // Immediately remove the matched order from the book to lock it
@@ -192,13 +248,59 @@ export class MatchingEngineService implements OnModuleInit {
       await this.redisPubSub.publish(REDIS_KEYS.ORDER_UPDATE_CHANNEL, {
         userId: bestMatch.user.id,
       });
+
+      // Emit WebSocket event to notify maker user about order status update
+      this.wsGateway.emitOrderUpdate(String(bestMatch.user.id), bestMatch.id, bestMatch.status);
     }
 
-    if (Number(remainingAmount) > 0) {
-      // If the incoming order is partially filled and still has remaining amount, add it to the order book.
-      await this.orderBookService.add(order);
+    const remaining = Number(remainingAmount);
+
+    if (remaining > 0) {
+      // At this point, order.market should already be loaded in processOrder()
+      // But add safety check and reload if needed
+      if (!order.market || !order.market.symbol) {
+        this.logger.warn(`Order ${order.id} missing market symbol, attempting to reload`);
+        const marketId = order.market?.id;
+        if (marketId) {
+          const marketReload = await this.marketRepo.findOne({
+            where: { id: marketId },
+          });
+          if (marketReload) {
+            order.market = marketReload;
+            this.logger.debug(`Successfully reloaded market for order ${order.id}`);
+          } else {
+            // Cannot add to orderbook without market symbol
+            this.logger.error(
+              `Cannot add order ${order.id} to orderbook: market ${marketId} not found`,
+            );
+            return remaining;
+          }
+        } else {
+          // No market information available - cannot add to orderbook
+          this.logger.error(`Cannot add order ${order.id} to orderbook: no market information`);
+          return remaining;
+        }
+      }
+
+      try {
+        await this.orderBookService.add(order);
+        this.logger.debug(
+          `Successfully added order ${order.id} to orderbook for symbol ${order.market.symbol}`,
+        );
+      } catch (error) {
+        this.logger.error(`Failed to add order ${order.id} to orderbook:`, error);
+        // This is a critical error - an order that should be in the orderbook is not
+        // But we continue processing to avoid blocking other orders
+      }
+    } else if (remaining === 0) {
+      try {
+        await this.orderBookService.remove(order);
+      } catch {
+        // Silently ignore removal errors
+      }
     }
-    return Number(remainingAmount);
+
+    return remaining;
   }
 
   private async processMarketOrder(order: Order): Promise<number> {
@@ -209,20 +311,11 @@ export class MatchingEngineService implements OnModuleInit {
       const bestMatch = await this.orderBookService.getBest(order.market.symbol, oppositeSide);
 
       if (!bestMatch) {
-        this.logger.warn(
-          `No match found for market order ${order.id}. Order may be partially filled or not filled at all.`,
-        );
         break; // No match found
       }
 
       // Prevent self-matching (self-trade prevention)
-      // For market orders, skip if it's the same user
       if (bestMatch.user.id === order.user.id) {
-        this.logger.log(
-          `Self-trade prevention: Market order ${order.id} cannot match with own order ${bestMatch.id}`,
-        );
-        // Market order fails to execute if best match is own order
-        // Stop processing - market order may remain partially filled or unfilled
         break;
       }
 
@@ -254,6 +347,9 @@ export class MatchingEngineService implements OnModuleInit {
       await this.redisPubSub.publish(REDIS_KEYS.ORDER_UPDATE_CHANNEL, {
         userId: bestMatch.user.id,
       });
+
+      // Emit WebSocket event to notify maker user about order status update
+      this.wsGateway.emitOrderUpdate(String(bestMatch.user.id), bestMatch.id, bestMatch.status);
     }
     return Number(remainingAmount);
   }
@@ -272,7 +368,6 @@ export class MatchingEngineService implements OnModuleInit {
     ]);
 
     if (!fullTakerUser || !fullMakerUser || !fullTakerMarket || !fullMakerMarket) {
-      this.logger.error('Failed to load full user or market entities.');
       return;
     }
 
@@ -283,9 +378,6 @@ export class MatchingEngineService implements OnModuleInit {
 
     // Prevent self-trade (should not happen, but double check)
     if (takerOrder.user.id === makerOrder.user.id) {
-      this.logger.error(
-        `Self-trade detected in executeTrade for user ${takerOrder.user.id}. Trade aborted.`,
-      );
       return;
     }
 
@@ -307,7 +399,6 @@ export class MatchingEngineService implements OnModuleInit {
       takerSide: takerOrder.side === OrderSide.BUY ? 'BUY' : 'SELL', // Save taker side for market display
     });
     await this.tradeRepo.save(trade);
-    this.logger.log(`Trade ${trade.id} executed: ${matchedAmount} @ ${tradePrice}`);
 
     // --- Xác định buyer/seller và ví liên quan ---
     const buyerUser = buyOrder.user;
@@ -347,7 +438,6 @@ export class MatchingEngineService implements OnModuleInit {
       ]);
 
     if (!buyerQuoteWallet || !buyerBaseWallet || !sellerBaseWallet || !sellerQuoteWallet) {
-      this.logger.error('One or more wallets not found for trade execution.');
       return;
     }
 
@@ -386,7 +476,6 @@ export class MatchingEngineService implements OnModuleInit {
     // --- Kiểm tra an toàn ---
     for (const w of [buyerQuoteWallet, buyerBaseWallet, sellerBaseWallet, sellerQuoteWallet]) {
       if (w.frozen < 0 || w.available < 0) {
-        this.logger.error(`Wallet ${w.id} negative after trade`);
         return;
       }
     }
@@ -398,8 +487,6 @@ export class MatchingEngineService implements OnModuleInit {
       sellerBaseWallet,
       sellerQuoteWallet,
     ]);
-
-    this.logger.log(`Wallets updated for trade ${trade.id}`);
 
     // --- Lưu bản ghi vào transactions ---
     const buyerTransaction = this.transactionRepo.create({
@@ -479,7 +566,24 @@ export class MatchingEngineService implements OnModuleInit {
     ];
     await this.ledgerRepo.save(ledgerEntries);
 
-    this.logger.log(`Transactions and ledger entries saved for trade ${trade.id}`);
+    // 🔥 Aggregate trade into candles (fire-and-forget to avoid blocking)
+    // Don't await - let it run in background so it doesn't delay order processing
+    this.candlesService
+      .aggregateTradeToCandle(trade, [
+        Timeframe.ONE_MINUTE,
+        Timeframe.FIVE_MINUTES,
+        Timeframe.FIFTEEN_MINUTES,
+        Timeframe.ONE_HOUR,
+      ])
+      .then((aggregatedCandles) => {
+        // Broadcast candle updates for each timeframe
+        for (const [timeframe, candle] of aggregatedCandles) {
+          this.wsGateway.broadcastCandleUpdate(market.symbol, timeframe, candle);
+        }
+      })
+      .catch(() => {
+        // Silently fail - candle aggregation should not block trade execution
+      });
 
     // 🔥 Emit WebSocket events to notify users about trade execution
     this.wsGateway.emitTradeExecuted({
@@ -498,9 +602,5 @@ export class MatchingEngineService implements OnModuleInit {
 
     // Broadcast orderbook update to all subscribers
     await this.wsGateway.broadcastOrderBookUpdate(market.symbol);
-
-    this.logger.log(
-      `📡 WebSocket events emitted for trade ${trade.id} (buyer: ${buyerUser.id}, seller: ${sellerUser.id})`,
-    );
   }
 }

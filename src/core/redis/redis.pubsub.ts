@@ -11,26 +11,17 @@ export class RedisPubSub {
     @Inject('REDIS_PUB_CLIENT') private readonly pubClient: Redis,
     @Inject('REDIS_SUB_CLIENT') private readonly subClient: Redis,
   ) {
-    this.subClient.on('error', (err) =>
-      this.logger.error(`Sub Client Error: ${err}`),
-    );
-    this.subClient.on('ready', () =>
-      console.log('Redis Pub/Sub Subscriber is ready.'),
-    );
+    this.subClient.on('error', (err) => this.logger.error(`Sub Client Error: ${err}`));
+    this.subClient.on('ready', () => console.log('Redis Pub/Sub Subscriber is ready.'));
   }
 
   async publish(channel: string, message: any): Promise<number> {
     try {
       const payload = JSON.stringify(message);
       const listeners = await this.pubClient.publish(channel, payload);
-      this.logger.log(
-        `Published to channel: ${channel}. Listeners: ${listeners}`,
-      );
       return listeners;
     } catch (error) {
-      this.logger.error(
-        `Error publishing to channel ${channel}: ${error.message}`,
-      );
+      this.logger.error(`Error publishing to channel ${channel}: ${error.message}`);
       throw error; // Nên throw để các service gọi publish có thể xử lý lỗi
     }
   }
@@ -38,11 +29,8 @@ export class RedisPubSub {
   async subscribe(channel: string): Promise<void> {
     try {
       await this.subClient.subscribe(channel);
-      this.logger.log(`Successfully subscribed to channel: ${channel}`);
     } catch (error) {
-      this.logger.error(
-        `Error subscribing to channel ${channel}: ${error.message}`,
-      );
+      this.logger.error(`Error subscribing to channel ${channel}: ${error.message}`);
       throw error;
     }
   }
@@ -50,13 +38,7 @@ export class RedisPubSub {
   onMessage(callback: (channel: string, message: any) => void) {
     this.subClient.on('message', (channel, message) => {
       try {
-        this.logger.debug(
-          `[RedisPubSub] Received raw message on channel: ${channel}, message: ${message}`,
-        );
         const parsedMessage = JSON.parse(message);
-        this.logger.debug(
-          `[RedisPubSub] Parsed message: ${JSON.stringify(parsedMessage)}`,
-        );
         callback(channel, parsedMessage);
       } catch (error) {
         this.logger.error(

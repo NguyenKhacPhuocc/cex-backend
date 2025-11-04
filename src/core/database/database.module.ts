@@ -11,6 +11,7 @@ import { Market } from 'src/modules/market/entities/market.entity';
 import { UserProfile } from 'src/modules/users/entities/user-profile.entity';
 import { LedgerEntry } from 'src/modules/ledger/entities/ledger.entity';
 import { Transaction } from 'src/modules/transactions/entities/transaction.entity';
+import { Candle } from 'src/modules/candles/entities/candle.entity';
 
 @Module({
   imports: [
@@ -24,6 +25,7 @@ import { Transaction } from 'src/modules/transactions/entities/transaction.entit
       Order,
       Trade,
       Market,
+      Candle,
     ]),
   ],
   providers: [

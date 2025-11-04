@@ -6,9 +6,10 @@ import { Trade } from '../trades/entities/trade.entity';
 import { Order } from '../order/entities/order.entity';
 import { Wallet } from '../wallets/entities/wallet.entity';
 import { Market } from '../market/entities/market.entity';
+import { Candle } from '../candles/entities/candle.entity';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Trade, Order, Wallet, Market])],
+  imports: [TypeOrmModule.forFeature([Trade, Order, Wallet, Market, Candle])],
   controllers: [DevController],
   providers: [DevService],
   exports: [DevService],

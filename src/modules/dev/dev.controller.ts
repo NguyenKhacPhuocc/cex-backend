@@ -28,7 +28,6 @@ export class DevController {
       wallets: string;
     };
   }> {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
     await this.devService.resetDatabase();
     return {
       message: 'Database reset successfully',

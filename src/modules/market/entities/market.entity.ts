@@ -1,12 +1,6 @@
 import { Order } from 'src/modules/order/entities/order.entity';
 import { Trade } from 'src/modules/trades/entities/trade.entity';
-import {
-  Entity,
-  PrimaryGeneratedColumn,
-  Column,
-  CreateDateColumn,
-  OneToMany,
-} from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, OneToMany } from 'typeorm';
 
 export enum MarketStatus {
   ACTIVE = 'active',
@@ -19,7 +13,7 @@ export class Market {
   id: number;
 
   @Column({ unique: true })
-  symbol: string; // BTC/USDT
+  symbol: string; // BTC_USDT
 
   @Column()
   baseAsset: string; // BTC

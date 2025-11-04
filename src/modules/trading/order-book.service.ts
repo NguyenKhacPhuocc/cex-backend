@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unsafe-member-access */
 /* eslint-disable @typescript-eslint/no-unsafe-return */
 
 import { Injectable, Logger } from '@nestjs/common';
@@ -21,16 +22,49 @@ export class OrderBookService {
 
   async add(order: Order): Promise<void> {
     const bookKey = this.getBookKey(order.market.symbol, order.side);
-    const score = order.side === OrderSide.BUY ? -order.price : order.price;
+    const score = order.side === OrderSide.BUY ? -Number(order.price) : Number(order.price);
 
     // Store the full order in a hash
     const hashKey = this.getOrderHashKey(order.market.symbol);
-    await this.redis.hset(hashKey, order.id, JSON.stringify(order));
+
+    // Ensure order has required fields before serialization
+    if (
+      !order.id ||
+      !order.market ||
+      !order.side ||
+      order.price === null ||
+      order.price === undefined
+    ) {
+      throw new Error(`Invalid order data: missing required fields`);
+    }
+
+    // Serialize order with only necessary fields to avoid circular references
+    // Keep market as simple object with just id and symbol
+    const orderToStore = {
+      id: order.id,
+      userId: order.userId || order.user?.id,
+      user: order.user ? { id: order.user.id } : undefined,
+      market: order.market
+        ? {
+            id: order.market.id,
+            symbol: order.market.symbol,
+          }
+        : undefined,
+      side: order.side,
+      type: order.type,
+      price: Number(order.price),
+      amount: Number(order.amount),
+      filled: Number(order.filled || 0),
+      status: order.status,
+      createdAt: order.createdAt,
+      updatedAt: order.updatedAt,
+    };
+
+    const orderData = JSON.stringify(orderToStore);
+    await this.redis.hset(hashKey, order.id, orderData);
 
     // Store only the order ID in the sorted set
     await this.redis.zadd(bookKey, score, order.id);
-
-    this.logger.log(`Added order ${order.id} to order book ${bookKey}`);
   }
 
   async getBest(symbol: string, side: OrderSide): Promise<Order | null> {
@@ -43,9 +77,27 @@ export class OrderBookService {
     const hashKey = this.getOrderHashKey(symbol);
     const orderData = await this.redis.hget(hashKey, orderId);
 
-    if (!orderData) return null;
+    if (!orderData) {
+      // Clean up orphaned order ID from sorted set
+      await this.redis.zrem(bookKey, orderId);
+      return null;
+    }
 
-    return JSON.parse(orderData);
+    try {
+      const order = JSON.parse(orderData) as Order;
+      // Ensure order has valid structure
+      if (!order.id || !order.side || !order.price || !order.amount) {
+        // Invalid order data - remove it
+        await this.remove({ id: orderId, side, market: { symbol } } as Order);
+        return null;
+      }
+      return order;
+    } catch {
+      // Invalid JSON - remove corrupted data
+      await this.redis.hdel(hashKey, orderId);
+      await this.redis.zrem(bookKey, orderId);
+      return null;
+    }
   }
 
   async remove(order: Order): Promise<void> {
@@ -57,8 +109,6 @@ export class OrderBookService {
 
     // Remove the order data from the hash
     await this.redis.hdel(hashKey, order.id);
-
-    this.logger.log(`Removed order ${order.id} from order book ${bookKey}`);
   }
 
   /**
@@ -67,7 +117,7 @@ export class OrderBookService {
    */
   async getOrderBookSnapshot(
     symbol: string,
-    depth = 20,
+    depth = 100,
   ): Promise<{
     symbol: string;
     asks: Array<{ price: number; amount: number; total: number }>;
@@ -99,40 +149,64 @@ export class OrderBookService {
     );
 
     // Aggregate by price level
-    const aggregateOrders = (
-      orders: Order[],
-    ): Array<{ price: number; amount: number; total: number }> => {
-      const priceMap = new Map<number, { amount: number; total: number }>();
+    const priceMap = new Map<number, { amount: number; total: number }>();
 
-      orders
-        .filter((o) => o !== null)
-        .forEach((order) => {
-          const price = Number(order.price);
-          const amount = Number(order.amount);
-          const existing = priceMap.get(price);
+    // Aggregate asks (SELL orders)
+    askOrders
+      .filter((o) => o !== null)
+      .forEach((order) => {
+        const price = Number(order.price);
+        const amount = Number(order.amount);
+        const existing = priceMap.get(price);
 
-          if (existing) {
-            existing.amount += amount;
-            existing.total = existing.amount * price;
-          } else {
-            priceMap.set(price, {
-              amount,
-              total: amount * price,
-            });
-          }
-        });
+        if (existing) {
+          existing.amount += amount;
+          existing.total = existing.amount * price;
+        } else {
+          priceMap.set(price, {
+            amount,
+            total: amount * price,
+          });
+        }
+      });
 
-      return Array.from(priceMap.entries())
-        .map(([price, data]) => ({
-          price,
-          amount: data.amount,
-          total: data.total,
-        }))
-        .sort((a, b) => a.price - b.price); // Sort by price ascending
-    };
+    const asks = Array.from(priceMap.entries())
+      .map(([price, data]) => ({
+        price,
+        amount: data.amount,
+        total: data.total,
+      }))
+      .sort((a, b) => b.price - a.price); // Sort asks by price descending
 
-    const asks = aggregateOrders(askOrders);
-    const bids = aggregateOrders(bidOrders).reverse(); // Reverse to get descending
+    // Clear map for bids
+    priceMap.clear();
+
+    // Aggregate bids (BUY orders)
+    bidOrders
+      .filter((o) => o !== null)
+      .forEach((order) => {
+        const price = Number(order.price);
+        const amount = Number(order.amount);
+        const existing = priceMap.get(price);
+
+        if (existing) {
+          existing.amount += amount;
+          existing.total = existing.amount * price;
+        } else {
+          priceMap.set(price, {
+            amount,
+            total: amount * price,
+          });
+        }
+      });
+
+    const bids = Array.from(priceMap.entries())
+      .map(([price, data]) => ({
+        price,
+        amount: data.amount,
+        total: data.total,
+      }))
+      .sort((a, b) => b.price - a.price); // Sort bids by price descending
 
     return {
       symbol,

@@ -8,6 +8,7 @@ import { UserProfile } from 'src/modules/users/entities/user-profile.entity';
 import { User } from 'src/modules/users/entities/user.entity';
 import { LedgerEntry } from 'src/modules/ledger/entities/ledger.entity';
 import { Wallet } from 'src/modules/wallets/entities/wallet.entity';
+import { Candle } from 'src/modules/candles/entities/candle.entity';
 
 dotenv.config();
 
@@ -16,16 +17,7 @@ export const databaseConfig: TypeOrmModuleOptions = {
   url: process.env.DATABASE_URL,
   synchronize: process.env.NODE_ENV === 'development',
   // logging: process.env.NODE_ENV === 'development',
-  entities: [
-    User,
-    UserProfile,
-    Wallet,
-    Transaction,
-    LedgerEntry,
-    Order,
-    Trade,
-    Market,
-  ],
+  entities: [User, UserProfile, Wallet, Transaction, LedgerEntry, Order, Trade, Market, Candle],
   // migrations: ['src/migrations/*.ts'],
   // migrationsRun: true,
   // ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,

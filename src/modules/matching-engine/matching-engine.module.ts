@@ -17,6 +17,7 @@ import { LedgerEntry } from '../ledger/entities/ledger.entity';
 import { TransactionsModule } from '../transactions/transactions.module';
 import { LedgerModule } from '../ledger/ledger.module';
 import { WebSocketModule } from 'src/core/websocket/websocket.module';
+import { CandlesModule } from '../candles/candles.module';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { WebSocketModule } from 'src/core/websocket/websocket.module';
     MarketModule,
     TransactionsModule,
     LedgerModule,
+    CandlesModule,
   ],
   providers: [MatchingEngineService],
   exports: [MatchingEngineService],

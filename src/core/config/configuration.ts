@@ -7,9 +7,7 @@ export default () => {
     process.env.DATABASE_URL ||
     `postgres://${process.env.DB_USERNAME}:${process.env.DB_PASSWORD}@${process.env.DB_HOST}:${process.env.DB_PORT}/${process.env.DB_DATABASE}`;
   if (!dbUrl.match(/^postgres:\/\/[^:]+:[^@]*@[^:]+:\d+\/[^/]+$/)) {
-    throw new Error(
-      'Invalid DATABASE_URL format. Expected: postgres://user:password@host:port/db',
-    );
+    throw new Error('Invalid DATABASE_URL format. Expected: postgres://user:password@host:port/db');
   }
 
   return {

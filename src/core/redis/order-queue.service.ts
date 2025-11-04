@@ -9,7 +9,7 @@ import { Order } from 'src/modules/order/entities/order.entity';
 export class OrderQueueService {
   private readonly logger = new Logger(OrderQueueService.name);
 
-  constructor(private readonly redis: RedisService) { }
+  constructor(private readonly redis: RedisService) {}
 
   private getQueueKey(symbol: string) {
     return `orderQueue:${symbol}`;

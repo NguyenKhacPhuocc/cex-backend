@@ -1,10 +1,4 @@
-import {
-  IsOptional,
-  IsString,
-  IsNumberString,
-  IsDateString,
-  IsEnum,
-} from 'class-validator';
+import { IsOptional, IsString, IsNumberString, IsDateString, IsEnum } from 'class-validator';
 import { WalletType } from '../entities/wallet.entity';
 
 export class HistoryQueryDto {

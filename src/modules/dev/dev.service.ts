@@ -6,6 +6,7 @@ import { Trade } from '../trades/entities/trade.entity';
 import { Order } from '../order/entities/order.entity';
 import { Wallet, WalletType } from '../wallets/entities/wallet.entity';
 import { Market } from '../market/entities/market.entity';
+import { Candle } from '../candles/entities/candle.entity';
 
 @Injectable()
 export class DevService {
@@ -20,6 +21,8 @@ export class DevService {
     private readonly walletRepository: Repository<Wallet>,
     @InjectRepository(Market)
     private readonly marketRepository: Repository<Market>,
+    @InjectRepository(Candle)
+    private readonly candleRepository: Repository<Candle>,
     @Inject('REDIS_CLIENT')
     private readonly redis: Redis,
     private readonly dataSource: DataSource,
@@ -37,23 +40,27 @@ export class DevService {
       this.logger.log('📦 Clearing Redis...');
       await this.clearRedis();
 
-      // Step 2: Delete trades (has FK to orders)
+      // Step 2: Delete candles (has FK to markets)
+      this.logger.log('🗑️ Deleting candles...');
+      await queryRunner.query('DELETE FROM candles');
+
+      // Step 3: Delete trades (has FK to orders)
       this.logger.log('🗑️ Deleting trades...');
       await queryRunner.query('DELETE FROM trades');
 
-      // Step 3: Delete orders
+      // Step 4: Delete orders
       this.logger.log('🗑️ Deleting orders...');
       await queryRunner.query('DELETE FROM orders');
 
-      // Step 4: Delete ledger_entries
+      // Step 5: Delete ledger_entries
       this.logger.log('🗑️ Deleting ledger entries...');
       await queryRunner.query('DELETE FROM ledger_entries');
 
-      // Step 5: Delete transactions
+      // Step 6: Delete transactions
       this.logger.log('🗑️ Deleting transactions...');
       await queryRunner.query('DELETE FROM transactions');
 
-      // Step 6: Reset wallets to initial values
+      // Step 7: Reset wallets to initial values
       this.logger.log('🔄 Resetting wallets...');
       await this.resetWallets(queryRunner);
 
@@ -77,42 +84,10 @@ export class DevService {
         this.logger.log(`Keys: ${allKeysBefore.join(', ')}`);
       }
 
-      // Get all markets to clear their order books
-      const markets = await this.marketRepository.find();
-
-      for (const market of markets) {
-        const symbol = market.symbol;
-
-        // Clear order books (ZSETs for sorted orders)
-        await this.redis.del(`orderbook:${symbol}:asks`);
-        await this.redis.del(`orderbook:${symbol}:bids`);
-
-        // Clear order hash maps (order details)
-        await this.redis.del(`orderbook:${symbol}:asks:hash`);
-        await this.redis.del(`orderbook:${symbol}:bids:hash`);
-
-        this.logger.log(`✅ Cleared order book for ${symbol}`);
-      }
-
-      // Clear order queue
-      const queueKeys = await this.redis.keys('order:queue:*');
-      if (queueKeys.length > 0) {
-        await this.redis.del(...queueKeys);
-        this.logger.log(`✅ Cleared ${queueKeys.length} order queues`);
-      }
-
-      // Clear any other order-related keys
-      const orderKeys = await this.redis.keys('order:*');
-      if (orderKeys.length > 0) {
-        await this.redis.del(...orderKeys);
-        this.logger.log(`✅ Cleared ${orderKeys.length} order keys`);
-      }
-
-      // Clear any remaining orderbook keys (catch-all)
-      const orderbookKeys = await this.redis.keys('orderbook:*');
-      if (orderbookKeys.length > 0) {
-        await this.redis.del(...orderbookKeys);
-        this.logger.log(`✅ Cleared ${orderbookKeys.length} orderbook keys`);
+      // Delete ALL keys in Redis (FLUSHDB equivalent)
+      if (allKeysBefore.length > 0) {
+        await this.redis.del(...allKeysBefore);
+        this.logger.log(`✅ Deleted ${allKeysBefore.length} keys from Redis`);
       }
 
       // Verify all keys are cleared
@@ -139,9 +114,22 @@ export class DevService {
     this.logger.log(`🔄 Resetting ${wallets.length} wallets...`);
 
     for (const wallet of wallets) {
-      // Determine initial balance based on currency
-      const isUSDT = wallet.currency === 'USDT';
-      const initialBalance = isUSDT ? 100000 : 100;
+      // Check if this is a bot user (email starts with "bot")
+      const user = wallet.user as { email?: string } | undefined;
+      const userEmail = user?.email || '';
+      const isBot = typeof userEmail === 'string' && userEmail.toLowerCase().startsWith('bot');
+
+      // Determine initial balance based on currency and user type
+      let initialBalance: number;
+      if (isBot) {
+        // Bot wallets: BTC = 100, USDT = 1000000 (from BOT_INITIAL_BALANCE config)
+        const isUSDT = wallet.currency === 'USDT';
+        initialBalance = isUSDT ? 1000000 : 100;
+      } else {
+        // Regular user wallets: USDT = 100000, BTC = 100
+        const isUSDT = wallet.currency === 'USDT';
+        initialBalance = isUSDT ? 1000000 : 100;
+      }
 
       await queryRunner.query(
         `
@@ -153,7 +141,7 @@ export class DevService {
       );
 
       this.logger.log(
-        `✅ Reset wallet for user ${wallet.user.id} - ${wallet.currency}: ${initialBalance}`,
+        `✅ Reset wallet for ${isBot ? 'bot' : 'user'} ${wallet.user.id} - ${wallet.currency}: ${initialBalance}`,
       );
     }
 
