@@ -66,6 +66,12 @@ PORT=8000
 NODE_ENV=development
 # For production: NODE_ENV=production
 
+# DATABASE SYNCHRONIZE (for initial setup only)
+# ⚠️ WARNING: Set to true ONLY for first-time setup to create tables
+# After tables are created, set to false and use migrations instead
+DB_SYNCHRONIZE=false
+# For initial setup: DB_SYNCHRONIZE=true (then set back to false)
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # BOT CONFIGURATION (Optional)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

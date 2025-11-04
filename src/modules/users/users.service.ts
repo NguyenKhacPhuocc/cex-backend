@@ -9,17 +9,23 @@ export class UserService implements OnModuleInit {
   constructor(@InjectRepository(User) private repo: Repository<User>) {}
 
   async onModuleInit() {
-    const adminEmail = 'admin@gmail.com';
-    const adminExists = await this.findByEmail(adminEmail);
-    if (!adminExists) {
-      const hashedPassword = await bcrypt.hash('123123', 10);
-      const adminUser = this.repo.create({
-        email: adminEmail,
-        passwordHash: hashedPassword,
-        role: UserRole.ADMIN,
-      });
-      await this.repo.save(adminUser);
-      //   console.log('Default admin user created: admin@admin.com');
+    try {
+      const adminEmail = 'admin@gmail.com';
+      const adminExists = await this.findByEmail(adminEmail);
+      if (!adminExists) {
+        const hashedPassword = await bcrypt.hash('123123', 10);
+        const adminUser = this.repo.create({
+          email: adminEmail,
+          passwordHash: hashedPassword,
+          role: UserRole.ADMIN,
+        });
+        await this.repo.save(adminUser);
+        console.log('Default admin user created: admin@gmail.com');
+      }
+    } catch (error) {
+      // If tables don't exist yet, log error but don't crash app
+      // Tables will be created by synchronize or migrations
+      console.error('Error initializing admin user (tables may not exist yet):', error.message);
     }
   }
 

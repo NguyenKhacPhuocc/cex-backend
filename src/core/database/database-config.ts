@@ -32,7 +32,9 @@ const getSSLConfig = (): boolean | object => {
 export const databaseConfig: TypeOrmModuleOptions = {
   type: 'postgres',
   url: process.env.DATABASE_URL,
-  synchronize: process.env.NODE_ENV === 'development',
+  // Allow synchronize in production if explicitly enabled (for initial setup)
+  // After tables are created, set DB_SYNCHRONIZE=false and use migrations instead
+  synchronize: process.env.DB_SYNCHRONIZE === 'true' || process.env.NODE_ENV === 'development',
   // logging: process.env.NODE_ENV === 'development',
   entities: [User, UserProfile, Wallet, Transaction, LedgerEntry, Order, Trade, Market, Candle],
   // migrations: ['src/migrations/*.ts'],
