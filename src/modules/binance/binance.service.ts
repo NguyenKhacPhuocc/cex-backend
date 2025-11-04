@@ -18,11 +18,13 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
   private ws: WebSocket | null = null;
   private wsReconnectInterval: NodeJS.Timeout | null = null;
   private throttleInterval: NodeJS.Timeout | null = null; // flush prices every 1s
+  private provider: 'binance' | 'coincap' = 'binance';
 
   // Binance symbol -> internal symbol mapping
   // Example: "BTCUSDT" -> "BTC_USDT"
   private binanceSymbolMap: Map<string, string> = new Map();
   private latestPrices: Map<string, number> = new Map(); // internal symbol -> last price
+  private assetToInternalMap: Map<string, string> = new Map(); // BASE -> BASE_USDT
 
   constructor(
     private readonly configService: ConfigService,
@@ -33,6 +35,10 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
 
   async onModuleInit() {
     const enabled = this.configService.get<string>('BINANCE_ENABLED', 'true');
+    const configuredProvider = (
+      this.configService.get<string>('PRICE_PROVIDER', 'coincap') || 'coincap'
+    ).toLowerCase();
+    this.provider = configuredProvider === 'binance' ? 'binance' : 'coincap';
 
     if (enabled === 'true') {
       await this.initializeSymbolMapping();
@@ -71,12 +77,14 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
           );
         }
 
-        // Only support USDT pairs for Binance
+        // Only support USDT pairs
         if (quoteAsset === 'USDT') {
-          // Convert internal symbol (BTC_USDT) to Binance symbol (BTCUSDT)
-          // Use baseAsset from database to ensure consistency
+          // Binance mapping (BINANCE: BTCUSDT -> BTC_USDT)
           const binanceSymbol = `${baseAsset}USDT`;
-          this.binanceSymbolMap.set(binanceSymbol, symbol); // Use validated symbol from DB
+          this.binanceSymbolMap.set(binanceSymbol, symbol);
+
+          // Generic asset -> internal mapping for CoinCap (BASE -> BASE_USDT)
+          this.assetToInternalMap.set(baseAsset, symbol);
 
           // Log for debugging
           this.logger.debug(`Mapped: ${symbol} (${baseAsset}/${quoteAsset}) -> ${binanceSymbol}`);
@@ -93,23 +101,28 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
 
   private connectWebSocket(): void {
     try {
-      if (this.binanceSymbolMap.size === 0) {
-        this.logger.warn('No symbols to subscribe');
-        return;
+      // Choose provider
+      if (this.provider === 'coincap') {
+        // CoinCap WebSocket (free, stable): all assets in one stream
+        const wsUrl = 'wss://ws.coincap.io/prices?assets=ALL';
+        this.logger.log('Connecting to CoinCap WebSocket...');
+        this.ws = new WebSocket(wsUrl);
+      } else {
+        if (this.binanceSymbolMap.size === 0) {
+          this.logger.warn('No symbols to subscribe');
+          return;
+        }
+        // Binance combined stream
+        const streams = Array.from(this.binanceSymbolMap.keys())
+          .map((symbol) => `${symbol.toLowerCase()}@ticker`)
+          .join('/');
+
+        const wsUrl = `wss://stream.binance.com:9443/stream?streams=${streams}`;
+        this.logger.log(
+          `Connecting to Binance WebSocket for ${this.binanceSymbolMap.size} symbols...`,
+        );
+        this.ws = new WebSocket(wsUrl);
       }
-
-      // Binance WebSocket Stream (combines multiple symbols into one stream)
-      // Format: wss://stream.binance.com:9443/stream?streams=btcusdt@ticker/ethusdt@ticker/...
-      const streams = Array.from(this.binanceSymbolMap.keys())
-        .map((symbol) => `${symbol.toLowerCase()}@ticker`)
-        .join('/');
-
-      const wsUrl = `wss://stream.binance.com:9443/stream?streams=${streams}`;
-
-      this.logger.log(
-        `Connecting to Binance WebSocket for ${this.binanceSymbolMap.size} symbols...`,
-      );
-      this.ws = new WebSocket(wsUrl);
 
       this.ws.on('open', () => {
         this.logger.log('✅ Binance WebSocket connected');
@@ -129,13 +142,18 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
             return;
           }
 
-          const message = JSON.parse(dataString) as {
-            stream?: string;
-            data?: BinanceTickerData;
-          };
-          // Binance sends: { stream: "btcusdt@ticker", data: { c: "68000", ... } }
-          if (message.stream && message.data) {
-            this.processBinanceWebSocketPrice(message.stream, message.data);
+          if (this.provider === 'coincap') {
+            // CoinCap format: { "bitcoin": "68000.12", "ethereum": "3500.99", ... }
+            const prices = JSON.parse(dataString) as Record<string, string>;
+            this.processCoinCapPrices(prices);
+          } else {
+            const message = JSON.parse(dataString) as {
+              stream?: string;
+              data?: BinanceTickerData;
+            };
+            if (message.stream && message.data) {
+              this.processBinanceWebSocketPrice(message.stream, message.data);
+            }
           }
         } catch (error) {
           this.logger.error(`Failed to parse WebSocket message: ${(error as Error).message}`);
@@ -143,11 +161,11 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
       });
 
       this.ws.on('error', (error) => {
-        this.logger.error(`Binance WebSocket error: ${error.message}`);
+        this.logger.error(`WebSocket error: ${error.message}`);
       });
 
       this.ws.on('close', () => {
-        this.logger.warn('Binance WebSocket connection closed, will reconnect...');
+        this.logger.warn('WebSocket connection closed, will reconnect...');
         this.scheduleReconnect();
       });
 
@@ -183,6 +201,44 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
       }
     } catch (error) {
       this.logger.error(`Failed to process Binance WebSocket price: ${(error as Error).message}`);
+    }
+  }
+
+  private processCoinCapPrices(prices: Record<string, string>): void {
+    // CoinCap IDs to base assets mapping
+    const idToAsset: Record<string, string> = {
+      bitcoin: 'BTC',
+      ethereum: 'ETH',
+      solana: 'SOL',
+      'binance-coin': 'BNB',
+      dogecoin: 'DOGE',
+      'shiba-inu': 'SHIB',
+      ripple: 'XRP',
+      cardano: 'ADA',
+      avalanche: 'AVAX',
+      polkadot: 'DOT',
+      'matic-network': 'MATIC',
+      litecoin: 'LTC',
+      uniswap: 'UNI',
+      chainlink: 'LINK',
+      cosmos: 'ATOM',
+      'ethereum-classic': 'ETC',
+      stellar: 'XLM',
+      algorand: 'ALGO',
+      vechain: 'VET',
+      filecoin: 'FIL',
+      tron: 'TRX',
+    };
+
+    for (const [id, priceStr] of Object.entries(prices)) {
+      const asset = idToAsset[id.toLowerCase()];
+      if (!asset) continue;
+      const internalSymbol = this.assetToInternalMap.get(asset);
+      if (!internalSymbol) continue;
+      const price = parseFloat(priceStr);
+      if (!(price > 0)) continue;
+      // Buffer latest price (throttled flush will write to Redis)
+      this.latestPrices.set(internalSymbol, price);
     }
   }
 
