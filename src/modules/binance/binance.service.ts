@@ -2,29 +2,20 @@ import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/commo
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import axios from 'axios';
 import { RedisService } from 'src/core/redis/redis.service';
 import { Market, MarketStatus } from '../market/entities/market.entity';
-import WebSocket from 'ws';
-
-interface BinanceTickerData {
-  c: string; // Last price
-  p: string; // Price change
-  P: string; // Price change percent
-}
 
 @Injectable()
 export class BinanceService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(BinanceService.name);
-  private ws: WebSocket | null = null;
-  private wsReconnectInterval: NodeJS.Timeout | null = null;
-  private throttleInterval: NodeJS.Timeout | null = null; // flush prices every 1s
-  private provider: 'binance' | 'coincap' = 'binance';
+  private pricePollingInterval: NodeJS.Timeout | null = null;
+  private provider: 'binance' | 'coincap' = 'coincap';
 
   // Binance symbol -> internal symbol mapping
   // Example: "BTCUSDT" -> "BTC_USDT"
-  private binanceSymbolMap: Map<string, string> = new Map();
-  private latestPrices: Map<string, number> = new Map(); // internal symbol -> last price
   private assetToInternalMap: Map<string, string> = new Map(); // BASE -> BASE_USDT
+  private latestPrices: Map<string, number> = new Map(); // internal symbol -> last price
 
   constructor(
     private readonly configService: ConfigService,
@@ -35,20 +26,16 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
 
   async onModuleInit() {
     const enabled = this.configService.get<string>('BINANCE_ENABLED', 'true');
-    const configuredProvider = (
-      this.configService.get<string>('PRICE_PROVIDER', 'coincap') || 'coincap'
-    ).toLowerCase();
-    this.provider = configuredProvider === 'binance' ? 'binance' : 'coincap';
+    this.provider = 'coincap'; // Force use CoinCap REST API (free, no auth needed)
 
     if (enabled === 'true') {
       await this.initializeSymbolMapping();
-      this.connectWebSocket();
+      this.startPricePolling();
     }
   }
 
   onModuleDestroy() {
-    this.disconnectWebSocket();
-    this.stopThrottleFlush();
+    this.stopPricePolling();
   }
 
   private async initializeSymbolMapping(): Promise<void> {
@@ -79,133 +66,144 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
 
         // Only support USDT pairs
         if (quoteAsset === 'USDT') {
-          // Binance mapping (BINANCE: BTCUSDT -> BTC_USDT)
-          const binanceSymbol = `${baseAsset}USDT`;
-          this.binanceSymbolMap.set(binanceSymbol, symbol);
-
           // Generic asset -> internal mapping for CoinCap (BASE -> BASE_USDT)
           this.assetToInternalMap.set(baseAsset, symbol);
 
           // Log for debugging
-          this.logger.debug(`Mapped: ${symbol} (${baseAsset}/${quoteAsset}) -> ${binanceSymbol}`);
-        } else {
-          this.logger.debug(`Skipping ${symbol}: quoteAsset ${quoteAsset} is not USDT`);
+          this.logger.debug(`Mapped: ${symbol} (${baseAsset}/${quoteAsset})`);
         }
       }
 
-      this.logger.log(`Initialized ${this.binanceSymbolMap.size} trading pairs from database`);
+      const mapSize = this.assetToInternalMap.size;
+      this.logger.log(`Initialized ${mapSize} trading pairs from database`);
     } catch (error) {
-      this.logger.error(`Failed to initialize symbol mapping: ${(error as Error).message}`);
+      const msg = (error as Error).message;
+      this.logger.error(`Failed to initialize symbol mapping: ${msg}`);
     }
   }
 
-  private connectWebSocket(): void {
-    try {
-      // Choose provider
-      if (this.provider === 'coincap') {
-        // CoinCap WebSocket (free, stable): all assets in one stream
-        const wsUrl = 'wss://ws.coincap.io/prices?assets=ALL';
-        this.logger.log('Connecting to CoinCap WebSocket...');
-        this.ws = new WebSocket(wsUrl);
-      } else {
-        if (this.binanceSymbolMap.size === 0) {
-          this.logger.warn('No symbols to subscribe');
-          return;
-        }
-        // Binance combined stream
-        const streams = Array.from(this.binanceSymbolMap.keys())
-          .map((symbol) => `${symbol.toLowerCase()}@ticker`)
-          .join('/');
+  /**
+   * Start polling CoinCap REST API instead of WebSocket
+   * CoinCap REST API is FREE and doesn't require authentication
+   */
+  private startPricePolling(): void {
+    this.logger.log('[PRICE_POLLING] 🚀 Starting CoinCap REST API polling...');
 
-        const wsUrl = `wss://stream.binance.com:9443/stream?streams=${streams}`;
-        this.logger.log(
-          `Connecting to Binance WebSocket for ${this.binanceSymbolMap.size} symbols...`,
-        );
-        this.ws = new WebSocket(wsUrl);
+    // Fetch immediately
+    void this.fetchPricesFromCoinCap();
+
+    // Then poll every 2 seconds (CoinCap updates every 1-2 seconds anyway)
+    this.pricePollingInterval = setInterval(() => {
+      void this.fetchPricesFromCoinCap();
+    }, 2000);
+
+    this.logger.log('[PRICE_POLLING] ✅ Price polling started (2s interval)');
+  }
+
+  private stopPricePolling(): void {
+    if (this.pricePollingInterval) {
+      clearInterval(this.pricePollingInterval);
+      this.pricePollingInterval = null;
+    }
+  }
+
+  /**
+   * Fetch prices from CoinCap REST API (FREE - no auth required)
+   * API Docs: https://docs.coincap.io/
+   */
+  private async fetchPricesFromCoinCap(): Promise<void> {
+    try {
+      // Get list of assets we need (BTC, ETH, SOL, etc.)
+      const assetsNeeded = Array.from(this.assetToInternalMap.keys()).join(',');
+
+      if (!assetsNeeded) {
+        return; // No markets to fetch
       }
 
-      this.ws.on('open', () => {
-        this.logger.log('✅ Binance WebSocket connected');
-        this.clearReconnectInterval();
+      // CoinCap REST API: Get current prices for specific assets
+      // Format: /v2/assets?ids=bitcoin,ethereum,solana
+      const assetIds = this.getAssetIdsToCoinCapIds(assetsNeeded);
+      const url = `https://api.coincap.io/v2/assets?ids=${assetIds}`;
+
+      this.logger.debug(`[COINCAP_API] 📡 Fetching from: ${url}`);
+
+      const response = await axios.get(url, {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        timeout: 5000,
       });
 
-      this.ws.on('message', (wsData: WebSocket.Data) => {
-        try {
-          let dataString: string;
-          if (typeof wsData === 'string') {
-            dataString = wsData;
-          } else if (Buffer.isBuffer(wsData)) {
-            dataString = wsData.toString('utf8');
-          } else {
-            // Fallback: convert to string (should not happen with Binance WebSocket)
-            this.logger.warn('Unexpected WebSocket data type, skipping');
-            return;
-          }
-
-          if (this.provider === 'coincap') {
-            // CoinCap format: { "bitcoin": "68000.12", "ethereum": "3500.99", ... }
-            const prices = JSON.parse(dataString) as Record<string, string>;
-            this.processCoinCapPrices(prices);
-          } else {
-            const message = JSON.parse(dataString) as {
-              stream?: string;
-              data?: BinanceTickerData;
-            };
-            if (message.stream && message.data) {
-              this.processBinanceWebSocketPrice(message.stream, message.data);
-            }
-          }
-        } catch (error) {
-          this.logger.error(`Failed to parse WebSocket message: ${(error as Error).message}`);
-        }
-      });
-
-      this.ws.on('error', (error) => {
-        this.logger.error(`WebSocket error: ${error.message}`);
-      });
-
-      this.ws.on('close', () => {
-        this.logger.warn('WebSocket connection closed, will reconnect...');
-        this.scheduleReconnect();
-      });
-
-      // Start throttled flush (1s) after WS is connected
-      this.startThrottleFlush();
-    } catch (error) {
-      this.logger.error(`Failed to connect Binance WebSocket: ${(error as Error).message}`);
-    }
-  }
-
-  private processBinanceWebSocketPrice(stream: string, data: BinanceTickerData): void {
-    try {
-      // Extract symbol from stream: "btcusdt@ticker" -> "BTCUSDT"
-      const binanceSymbol = stream.split('@')[0].toUpperCase();
-
-      if (!this.binanceSymbolMap.has(binanceSymbol)) {
-        // Symbol not in our mapping - might be a market we don't support
-        this.logger.debug(`Ignoring price update for unmapped symbol: ${binanceSymbol}`);
+      if (response.status !== 200) {
+        const status = response.status;
+        const statusText = response.statusText;
+        this.logger.error(`[COINCAP_API] ❌ HTTP Error ${status}: ${statusText}`);
         return;
       }
 
-      // Get internal symbol from database format: "BTC_USDT"
-      const internalSymbol = this.binanceSymbolMap.get(binanceSymbol)!;
+      const data = response.data as {
+        data?: Array<{ id: string; priceUsd: string }>;
+      };
 
-      // Binance ticker data: { c: "68000", ... } where 'c' is the last price
-      const price = parseFloat(data.c || '0');
-
-      if (price > 0) {
-        // Buffer latest price; a separate interval flushes to Redis every 1s
-        this.latestPrices.set(internalSymbol, price);
-      } else {
-        this.logger.warn(`Invalid price received for ${internalSymbol}: ${data.c}`);
+      if (!data.data || data.data.length === 0) {
+        this.logger.warn('[COINCAP_API] ⚠️ No price data received');
+        return;
       }
+
+      // Process prices
+      this.processCoinCapRestPrices(data.data);
+      this.flushPricesToRedis();
     } catch (error) {
-      this.logger.error(`Failed to process Binance WebSocket price: ${(error as Error).message}`);
+      const msg = (error as Error).message;
+      this.logger.error(`[COINCAP_API] ❌ Failed to fetch prices: ${msg}`);
+      if (error instanceof axios.AxiosError) {
+        this.logger.debug(`[COINCAP_API] Error Code: ${error.code}`);
+        this.logger.debug(`[COINCAP_API] Status: ${error.response?.status}`);
+        this.logger.debug(`[COINCAP_API] URL: ${error.config?.url}`);
+      }
     }
   }
 
-  private processCoinCapPrices(prices: Record<string, string>): void {
-    // CoinCap IDs to base assets mapping
+  /**
+   * Convert asset symbols to CoinCap IDs
+   * Example: BTC -> bitcoin, ETH -> ethereum
+   */
+  private getAssetIdsToCoinCapIds(assetsStr: string): string {
+    const assetToIdMap: Record<string, string> = {
+      BTC: 'bitcoin',
+      ETH: 'ethereum',
+      SOL: 'solana',
+      BNB: 'binance-coin',
+      DOGE: 'dogecoin',
+      SHIB: 'shiba-inu',
+      XRP: 'ripple',
+      ADA: 'cardano',
+      AVAX: 'avalanche-2',
+      DOT: 'polkadot',
+      MATIC: 'matic-network',
+      LTC: 'litecoin',
+      UNI: 'uniswap',
+      LINK: 'chainlink',
+      ATOM: 'cosmos',
+      ETC: 'ethereum-classic',
+      XLM: 'stellar',
+      ALGO: 'algorand',
+      VET: 'vechain',
+      FIL: 'filecoin',
+      TRX: 'tron',
+      TAO: 'bittensor',
+      TON: 'the-open-network',
+      PEPE: 'pepe',
+    };
+
+    const assets = assetsStr.split(',');
+    return assets.map((asset) => assetToIdMap[asset.trim()] || asset.toLowerCase()).join(',');
+  }
+
+  /**
+   * Process prices from CoinCap REST API response
+   */
+  private processCoinCapRestPrices(assets: Array<{ id: string; priceUsd: string }>): void {
     const idToAsset: Record<string, string> = {
       bitcoin: 'BTC',
       ethereum: 'ETH',
@@ -215,7 +213,7 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
       'shiba-inu': 'SHIB',
       ripple: 'XRP',
       cardano: 'ADA',
-      avalanche: 'AVAX',
+      'avalanche-2': 'AVAX',
       polkadot: 'DOT',
       'matic-network': 'MATIC',
       litecoin: 'LTC',
@@ -228,67 +226,51 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
       vechain: 'VET',
       filecoin: 'FIL',
       tron: 'TRX',
+      bittensor: 'TAO',
+      'the-open-network': 'TON',
+      pepe: 'PEPE',
     };
 
-    for (const [id, priceStr] of Object.entries(prices)) {
-      const asset = idToAsset[id.toLowerCase()];
-      if (!asset) continue;
-      const internalSymbol = this.assetToInternalMap.get(asset);
+    const processedPrices: string[] = [];
+
+    for (const asset of assets) {
+      const assetSymbol = idToAsset[asset.id.toLowerCase()];
+      if (!assetSymbol) continue;
+
+      const internalSymbol = this.assetToInternalMap.get(assetSymbol);
       if (!internalSymbol) continue;
-      const price = parseFloat(priceStr);
+
+      const price = parseFloat(asset.priceUsd);
       if (!(price > 0)) continue;
-      // Buffer latest price (throttled flush will write to Redis)
+
       this.latestPrices.set(internalSymbol, price);
+      processedPrices.push(`${internalSymbol}=${price.toFixed(2)}`);
     }
-  }
 
-  private scheduleReconnect(): void {
-    this.clearReconnectInterval();
-    // Reconnect after 5 seconds
-    this.wsReconnectInterval = setTimeout(() => {
-      this.logger.log('Attempting to reconnect WebSocket...');
-      this.connectWebSocket();
-    }, 5000);
-  }
-
-  private clearReconnectInterval(): void {
-    if (this.wsReconnectInterval) {
-      clearTimeout(this.wsReconnectInterval);
-      this.wsReconnectInterval = null;
-    }
-  }
-
-  private disconnectWebSocket(): void {
-    this.clearReconnectInterval();
-    if (this.ws) {
-      this.ws.close();
-      this.ws = null;
+    if (processedPrices.length > 0) {
+      const msg = processedPrices.join(', ');
+      this.logger.log(`[COINCAP_PRICES] 💰 Prices: ${msg}`);
     }
   }
 
   /**
-   * Flush buffered prices to Redis every 1 second (throttling)
+   * Flush buffered prices to Redis
    */
-  private startThrottleFlush(): void {
-    this.stopThrottleFlush();
-    this.throttleInterval = setInterval(() => {
-      if (this.latestPrices.size === 0) return;
-      // Snapshot to avoid long lock
-      const entries = Array.from(this.latestPrices.entries());
-      // Clear map to accept fresh updates while flushing
-      this.latestPrices.clear();
-      // Write all latest prices to Redis
-      for (const [internalSymbol, price] of entries) {
-        void this.redisService.set(`binance:price:${internalSymbol}`, String(price), 3); // short TTL
-      }
-    }, 1000);
-  }
+  private flushPricesToRedis(): void {
+    if (this.latestPrices.size === 0) return;
 
-  private stopThrottleFlush(): void {
-    if (this.throttleInterval) {
-      clearInterval(this.throttleInterval);
-      this.throttleInterval = null;
+    const entries = Array.from(this.latestPrices.entries());
+    this.latestPrices.clear();
+
+    const pricesForLog: string[] = [];
+    for (const [internalSymbol, price] of entries) {
+      const key = `binance:price:${internalSymbol}`;
+      void this.redisService.set(key, String(price), 5); // 5s TTL
+      pricesForLog.push(`${internalSymbol}=${price.toFixed(2)}`);
     }
+
+    const msg = pricesForLog.join(', ');
+    this.logger.log(`[REDIS_FLUSH] 💾 Saved to Redis: ${msg}`);
   }
 
   /**
@@ -297,9 +279,17 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
   async getLastPrice(symbol: string): Promise<number | null> {
     try {
       const cached = await this.redisService.get(`binance:price:${symbol}`);
-      return cached ? parseFloat(cached) : null;
+      if (cached) {
+        const price = parseFloat(cached);
+        const msg = `Retrieved ${symbol} from Redis: ${price}`;
+        this.logger.debug(`[REDIS_GET] 📖 ${msg}`);
+        return price;
+      }
+      this.logger.warn(`[REDIS_GET] ⚠️ No price in Redis for ${symbol}`);
+      return null;
     } catch (error) {
-      this.logger.error(`Failed to get last price from cache: ${(error as Error).message}`);
+      const msg = (error as Error).message;
+      this.logger.error(`Failed to get last price from cache: ${msg}`);
       return null;
     }
   }

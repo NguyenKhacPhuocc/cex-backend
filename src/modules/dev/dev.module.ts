@@ -7,9 +7,10 @@ import { Order } from '../order/entities/order.entity';
 import { Wallet } from '../wallets/entities/wallet.entity';
 import { Market } from '../market/entities/market.entity';
 import { Candle } from '../candles/entities/candle.entity';
+import { User } from '../users/entities/user.entity';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Trade, Order, Wallet, Market, Candle])],
+  imports: [TypeOrmModule.forFeature([Trade, Order, Wallet, Market, Candle, User])],
   controllers: [DevController],
   providers: [DevService],
   exports: [DevService],
