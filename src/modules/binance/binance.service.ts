@@ -15,10 +15,10 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
     private redisService: RedisService,
   ) {}
 
-  async onModuleInit() {
+  onModuleInit() {
     const enabled = this.configService.get<string>('BINANCE_ENABLED', 'true');
     if (enabled === 'true') {
-      await this.initializeSymbolMapping();
+      this.initializeSymbolMapping();
       this.startPricePolling();
     }
   }
@@ -30,7 +30,7 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
   /**
    * Initialize mapping from Binance symbols to internal symbols
    */
-  private async initializeSymbolMapping(): Promise<void> {
+  private initializeSymbolMapping(): void {
     // Map Binance symbols to internal symbols
     const mapping: Record<string, string> = {
       BTCUSDT: 'BTC_USDT',
