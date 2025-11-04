@@ -16,9 +16,44 @@ import { OrderBookService } from '../../modules/trading/order-book.service';
 import { MarketService } from '../../modules/market/market.service';
 import { Candle } from '../../modules/candles/entities/candle.entity';
 
+// Helper function to get WebSocket CORS origins (same logic as main.ts)
+function getWebSocketCorsOrigins(): string[] {
+  const origins: string[] = [];
+
+  // Add localhost for development
+  if (process.env.NODE_ENV !== 'production') {
+    origins.push('http://localhost:3000');
+  }
+
+  // Parse FRONTEND_URL - support multiple URLs separated by comma
+  const frontendUrl = process.env.FRONTEND_URL;
+  if (frontendUrl) {
+    const urls = frontendUrl.split(',').map((url) => url.trim());
+
+    for (const url of urls) {
+      if (!url) continue;
+
+      // Add https:// if missing protocol
+      let normalizedUrl = url;
+      if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        normalizedUrl = `https://${url}`;
+      }
+
+      origins.push(normalizedUrl);
+    }
+  }
+
+  // If no origins specified, allow localhost
+  if (origins.length === 0) {
+    origins.push('http://localhost:3000');
+  }
+
+  return origins;
+}
+
 @WebSocketGateway({
   cors: {
-    origin: process.env.FRONTEND_URL || ['http://localhost:3000'],
+    origin: getWebSocketCorsOrigins(),
     credentials: true,
   },
   namespace: '/trading',

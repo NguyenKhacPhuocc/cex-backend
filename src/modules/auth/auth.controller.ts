@@ -37,22 +37,24 @@ export class AuthController {
   async login(@Body() loginDto: LoginUserDto, @Res({ passthrough: true }) res: Response) {
     const result = await this.authService.login(loginDto);
 
-    // Set accessToken trong HTTP-only cookie (1 hour)
-    res.cookie('accessToken', result.accessToken, {
+    // Determine cookie options based on environment
+    const isProduction = process.env.NODE_ENV === 'production';
+    const cookieOptions = {
       httpOnly: true,
-      secure: false, // Set false in development để test
-      sameSite: 'lax', // Đổi từ 'strict' → 'lax' để cookies work
+      // For cross-site cookies (vercel.app → onrender.com), need secure: true + sameSite: 'none'
+      secure: isProduction, // true in production (HTTPS required)
+      sameSite: isProduction ? ('none' as const) : ('lax' as const), // 'none' for cross-site, 'lax' for same-site
       maxAge: 60 * 60 * 1000, // 1 hour in milliseconds
       path: '/', // Explicit path
-    });
+    };
+
+    // Set accessToken trong HTTP-only cookie (1 hour)
+    res.cookie('accessToken', result.accessToken, cookieOptions);
 
     // Set refreshToken trong HTTP-only cookie (30 days)
     res.cookie('refreshToken', result.refreshToken, {
-      httpOnly: true,
-      secure: false, // Set false in development để test
-      sameSite: 'lax', // Đổi từ 'strict' → 'lax' để cookies work
+      ...cookieOptions,
       maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days in milliseconds
-      path: '/', // Explicit path
     });
 
     // 🚨 DEVELOPMENT ONLY - Trả về tokens để test Postman
@@ -75,34 +77,36 @@ export class AuthController {
 
     const { accessToken } = await this.authService.refreshAccessToken(refreshToken);
 
-    // Set new accessToken in cookie
-    res.cookie('accessToken', accessToken, {
+    // Determine cookie options based on environment
+    const isProduction = process.env.NODE_ENV === 'production';
+    const cookieOptions = {
       httpOnly: true,
-      secure: false,
-      sameSite: 'lax',
+      secure: isProduction,
+      sameSite: isProduction ? ('none' as const) : ('lax' as const),
       maxAge: 60 * 60 * 1000, // 1 hour
       path: '/',
-    });
+    };
+
+    // Set new accessToken in cookie
+    res.cookie('accessToken', accessToken, cookieOptions);
 
     return { message: 'Token refreshed successfully' };
   }
 
   @Post('logout')
   logout(@Res({ passthrough: true }) res: Response) {
-    // Xoá cả 2 cookies: accessToken và refreshToken
-    res.clearCookie('accessToken', {
+    // Determine cookie options based on environment (must match login/refresh)
+    const isProduction = process.env.NODE_ENV === 'production';
+    const cookieOptions = {
       httpOnly: true,
-      secure: false,
-      sameSite: 'lax',
+      secure: isProduction,
+      sameSite: isProduction ? ('none' as const) : ('lax' as const),
       path: '/',
-    });
+    };
 
-    res.clearCookie('refreshToken', {
-      httpOnly: true,
-      secure: false,
-      sameSite: 'lax',
-      path: '/',
-    });
+    // Xoá cả 2 cookies: accessToken và refreshToken
+    res.clearCookie('accessToken', cookieOptions);
+    res.clearCookie('refreshToken', cookieOptions);
 
     return { message: 'Đăng xuất thành công' };
   }

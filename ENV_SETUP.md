@@ -56,8 +56,11 @@ JWT_REFRESH_SECRET=your-refresh-secret-min-32-chars-change-this-in-production
 # CORS CONFIGURATION
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Frontend URL - MUST match your deployed frontend domain
+# Supports multiple URLs separated by comma
+# If protocol (https://) is missing, it will be added automatically
 FRONTEND_URL=http://localhost:3000
-# For production: https://your-frontend.vercel.app
+# For production: https://cex-project.vercel.app
+# Or multiple: https://cex-project.vercel.app,https://www.cex-project.vercel.app
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # SERVER CONFIGURATION
