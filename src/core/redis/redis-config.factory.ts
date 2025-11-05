@@ -1,6 +1,6 @@
 // src/core/redis/redis-config.factory.ts (Đã cập nhật)
 
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { env } from 'process';
 import * as IORedis from 'ioredis';
 import * as redisStore from 'cache-manager-ioredis';
@@ -8,6 +8,8 @@ import { CacheOptionsFactory, CacheModuleOptions } from '@nestjs/cache-manager';
 
 @Injectable()
 export class RedisConfigFactory implements CacheOptionsFactory {
+  private readonly logger = new Logger(RedisConfigFactory.name);
+
   /**
    * Parse Redis URL to extract connection options
    * Supports formats:
@@ -30,19 +32,24 @@ export class RedisConfigFactory implements CacheOptionsFactory {
         // Enable TLS for rediss:// URLs (Upstash uses TLS)
         tls: isTLS ? {} : undefined,
       };
-    } catch {
-      throw new Error(`Invalid REDIS_URL format: ${url}`);
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      throw new Error(`Invalid REDIS_URL format: ${errorMsg}`);
     }
   }
 
-  // 1. Dùng cho RedisModule (trả về tùy chọn ioredis thuần)
+  // Create Redis options for RedisModule (pure ioredis options)
   createRedisOptions(): IORedis.RedisOptions {
     // Priority: REDIS_URL > individual variables
     if (env.REDIS_URL) {
+      this.logger.debug('Using REDIS_URL for connection');
       return this.parseRedisUrl(env.REDIS_URL);
     }
 
     // Fallback to individual variables
+    this.logger.debug(
+      `Using individual Redis config: host=${env.REDIS_HOST}, port=${env.REDIS_PORT}`,
+    );
     return {
       host: env.REDIS_HOST || 'localhost',
       port: env.REDIS_PORT ? parseInt(env.REDIS_PORT, 10) : 6379,
@@ -51,7 +58,7 @@ export class RedisConfigFactory implements CacheOptionsFactory {
     };
   }
 
-  // 2. Dùng cho CacheModule (trả về tùy chọn CacheModule có store)
+  // Create cache options for CacheModule (includes store)
   createCacheOptions(): CacheModuleOptions {
     const redisOptions = this.createRedisOptions();
     return {

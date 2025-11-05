@@ -28,7 +28,7 @@ export class AuthController {
 
   @Throttle({ auth: { limit: 3, ttl: 60000 } }) // 3 attempts per minute
   @Post('register')
-  register(@Body() dto: RegisterUserDto) {
+  async register(@Body() dto: RegisterUserDto) {
     return this.authService.register(dto);
   }
 
@@ -41,30 +41,25 @@ export class AuthController {
     const isProduction = process.env.NODE_ENV === 'production';
     const cookieOptions = {
       httpOnly: true,
-      // For cross-site cookies (vercel.app → onrender.com), need secure: true + sameSite: 'none'
       secure: isProduction, // true in production (HTTPS required)
       sameSite: isProduction ? ('none' as const) : ('lax' as const), // 'none' for cross-site, 'lax' for same-site
       maxAge: 60 * 60 * 1000, // 1 hour in milliseconds
-      path: '/', // Explicit path
+      path: '/',
     };
 
-    // Set accessToken trong HTTP-only cookie (1 hour)
+    // Set accessToken in HTTP-only cookie (1 hour)
     res.cookie('accessToken', result.accessToken, cookieOptions);
 
-    // Set refreshToken trong HTTP-only cookie (30 days)
+    // Set refreshToken in HTTP-only cookie (30 days)
     res.cookie('refreshToken', result.refreshToken, {
       ...cookieOptions,
-      maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days in milliseconds
+      maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
     });
 
-    // 🚨 DEVELOPMENT ONLY - Trả về tokens để test Postman
-    // ❌ KHÔNG làm điều này trong PRODUCTION!
-    // TODO: Xóa phần này trước khi deploy
+    // // Return only safe data (tokens stored in httpOnly cookies)
+    // const { accessToken, refreshToken, ...safeResult } = result;
+    // return safeResult;
     return result; // Bao gồm cả accessToken và refreshToken
-
-    // 🔒 PRODUCTION CODE (comment lại để test):
-    // const { accessToken, refreshToken, ...response } = result;
-    // return response;
   }
 
   @Throttle({ auth: { limit: 10, ttl: 60000 } }) // 10 refreshes per minute
@@ -72,7 +67,7 @@ export class AuthController {
   async refresh(@Req() req: RequestWithCookies, @Res({ passthrough: true }) res: Response) {
     const refreshToken = req.cookies?.refreshToken;
     if (!refreshToken) {
-      throw new UnauthorizedException('Không tìm thấy refresh token');
+      throw new UnauthorizedException('Refresh token not found');
     }
 
     const { accessToken } = await this.authService.refreshAccessToken(refreshToken);
@@ -104,17 +99,17 @@ export class AuthController {
       path: '/',
     };
 
-    // Xoá cả 2 cookies: accessToken và refreshToken
+    // Clear both cookies: accessToken and refreshToken
     res.clearCookie('accessToken', cookieOptions);
     res.clearCookie('refreshToken', cookieOptions);
 
-    return { message: 'Đăng xuất thành công' };
+    return { message: 'Logout successful' };
   }
 
   @Get('verify')
   @UseGuards(JwtAuthGuard)
   verifyToken(@GetUser() user: User) {
-    // Guard đã verify token, trả về user info
+    // Guard has verified token, return user info without password
     const { passwordHash, ...safeUser } = user;
     return {
       isAuthenticated: true,

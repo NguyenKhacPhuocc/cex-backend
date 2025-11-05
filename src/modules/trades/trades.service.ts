@@ -54,11 +54,6 @@ export class TradesService {
       order: { timestamp: 'DESC' },
     });
 
-    console.log(
-      `📊 [getUserTradeBySymbol] User ${user.id} trades for ${symbol}:`,
-      JSON.stringify(trades, null, 2),
-    );
-
     const result = trades.map((trade) => {
       const isBuyer = trade.buyer.id === user.id;
       const total = Number(trade.price) * Number(trade.amount);
@@ -82,11 +77,6 @@ export class TradesService {
       return dto;
     });
 
-    console.log(
-      `📤 [getUserTradeBySymbol] Formatted result for user ${user.id}:`,
-      JSON.stringify(result, null, 2),
-    );
-
     return result;
   }
 
@@ -99,7 +89,7 @@ export class TradesService {
     limit = 50,
   ): Promise<
     {
-      id: number;
+      id: string;
       price: number;
       amount: number;
       total: string;
@@ -114,27 +104,19 @@ export class TradesService {
       take: limit,
     });
 
-    console.log('📊 [getMarketTrades] Raw trades from DB:', JSON.stringify(trades, null, 2));
-    console.log('📊 [getMarketTrades] First trade timestamp:', trades[0]?.timestamp);
-
     const result = trades.map((trade) => {
-      console.log(`🕐 Trade ${trade.id} timestamp:`, trade.timestamp, typeof trade.timestamp);
-      // Use takerSide if available, otherwise default to BUY
-      // takerSide determines color: BUY = green (price went up), SELL = red (price went down)
       const side = trade.takerSide || 'BUY';
       return {
         id: trade.id,
-        price: Number(trade.price), // Convert decimal string to number
-        amount: Number(trade.amount), // Convert decimal string to number
+        price: Number(trade.price),
+        amount: Number(trade.amount),
         total: (Number(trade.price) * Number(trade.amount)).toFixed(8),
-        side, // Use takerSide from database
+        side,
         timestamp: trade.timestamp
           ? new Date(trade.timestamp).toISOString()
           : new Date().toISOString(),
-      };
+      } as unknown as TradeHistoryDto;
     });
-
-    console.log('📤 [getMarketTrades] Formatted result:', JSON.stringify(result, null, 2));
 
     return result;
   }

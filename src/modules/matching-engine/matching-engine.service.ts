@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-argument */
 /* eslint-disable @typescript-eslint/no-floating-promises */
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { RedisService } from 'src/core/redis/redis.service';
@@ -22,6 +21,7 @@ import { LedgerEntry, LedgerReferenceType } from '../ledger/entities/ledger.enti
 import { TradingWebSocketGateway } from 'src/core/websocket/websocket.gateway';
 import { CandlesService } from '../candles/candles.service';
 import { Timeframe } from '../candles/entities/candle.entity';
+import { WalletCalculationService } from 'src/common/services/wallet-calculation.service';
 
 @Injectable()
 export class MatchingEngineService implements OnModuleInit {
@@ -33,6 +33,7 @@ export class MatchingEngineService implements OnModuleInit {
     private readonly redisPubSub: RedisPubSub,
     private readonly wsGateway: TradingWebSocketGateway,
     private readonly candlesService: CandlesService,
+    private readonly walletCalculationService: WalletCalculationService,
     @InjectRepository(Order)
     private orderRepo: Repository<Order>,
     @InjectRepository(User)
@@ -58,7 +59,9 @@ export class MatchingEngineService implements OnModuleInit {
     });
   }
 
-  async handleCancelOrder(order: Order) {
+  async handleCancelOrder(message: unknown): Promise<void> {
+    // Cast message from PubSub to Order
+    const order = message as Order;
     await this.orderBookService.remove(order);
   }
 
@@ -170,6 +173,38 @@ export class MatchingEngineService implements OnModuleInit {
 
     await this.orderRepo.save(newOrderEntity);
 
+    // For market BUY orders: Unlock remaining frozen balance that wasn't used
+    // Market BUY locks entire available balance, but only uses tradeValue
+    if (
+      order.type === OrderType.MARKET &&
+      order.side === OrderSide.BUY &&
+      order.status !== OrderStatus.OPEN
+    ) {
+      const currencyToUnlock = order.market.quoteAsset;
+      const wallet = await this.walletRepo.findOne({
+        where: {
+          user: { id: order.user.id },
+          currency: currencyToUnlock,
+          walletType: WalletType.SPOT,
+        },
+      });
+
+      if (wallet && Number(wallet.frozen) > 0) {
+        // Calculate total trade value used (from filled amount)
+        // We need to estimate from filled amount since we don't track exact trade values
+        // For simplicity, unlock all remaining frozen (since order is filled/partially filled)
+        // The actual unlocking happens in executeTrade, but we need to handle remaining frozen
+        const remainingFrozen = Number(wallet.frozen);
+        if (remainingFrozen > 0) {
+          this.walletCalculationService.unlockBalance(wallet, remainingFrozen);
+          await this.walletRepo.save(wallet);
+          this.logger.debug(
+            `Unlocked remaining frozen balance for market BUY order ${order.id}: ${remainingFrozen} ${currencyToUnlock}`,
+          );
+        }
+      }
+    }
+
     // Publish message to invalidate cache for the user of the processed order
     const takerUserId = order.user.id;
     await this.redisPubSub.publish(REDIS_KEYS.ORDER_UPDATE_CHANNEL, {
@@ -179,8 +214,11 @@ export class MatchingEngineService implements OnModuleInit {
     // Emit WebSocket event to notify user about order status update
     this.wsGateway.emitOrderUpdate(String(takerUserId), newOrderEntity.id, newOrderEntity.status);
 
-    // Broadcast orderbook update to all subscribers
-    await this.wsGateway.broadcastOrderBookUpdate(order.market.symbol);
+    // Broadcast orderbook update to all subscribers (fire-and-forget to avoid blocking)
+    // This ensures order processing completes quickly
+    this.wsGateway.broadcastOrderBookUpdate(order.market.symbol).catch((error) => {
+      this.logger.error(`Error broadcasting orderbook update:`, error);
+    });
   }
 
   private async processLimitOrder(order: Order): Promise<number> {
@@ -188,6 +226,7 @@ export class MatchingEngineService implements OnModuleInit {
     let remainingAmount = order.amount;
     const maxIterations = 100; // Prevent infinite loops
     let iterations = 0;
+    const skippedSelfMatches: Order[] = []; // Track self-match orders to add back later
 
     while (remainingAmount > 0 && iterations < maxIterations) {
       iterations++;
@@ -196,6 +235,11 @@ export class MatchingEngineService implements OnModuleInit {
       const bestMatch = await this.orderBookService.getBest(order.market.symbol, oppositeSide);
 
       if (!bestMatch) {
+        // No more matches available, add back all skipped self-match orders
+        for (const skippedOrder of skippedSelfMatches) {
+          await this.orderBookService.add(skippedOrder);
+        }
+        skippedSelfMatches.length = 0; // Clear array
         break; // No match found, break the loop
       }
 
@@ -203,12 +247,16 @@ export class MatchingEngineService implements OnModuleInit {
       // Note: Different bots are different users, so they can trade with each other
       // This only prevents the same user from matching with themselves
       if (bestMatch.user.id === order.user.id) {
-        // Skip this match - break the loop to avoid infinite self-trade checking
-        // The existing order will remain in the orderbook
+        // Skip this match - continue to next best match instead of breaking
+        // This allows the order to match with other users' orders
         this.logger.debug(
-          `Self-trade prevention: skipping match for user ${order.user.id}, order ${order.id} vs ${bestMatch.id}`,
+          `Self-trade prevention: skipping match for user ${order.user.id}, order ${order.id} vs ${bestMatch.id}, continuing to next match`,
         );
-        break;
+        // Temporarily remove self-match order from orderbook to skip it
+        skippedSelfMatches.push(bestMatch);
+        await this.orderBookService.remove(bestMatch);
+        // Continue to next iteration to find next best match
+        continue;
       }
 
       const canMatch =
@@ -253,6 +301,11 @@ export class MatchingEngineService implements OnModuleInit {
       this.wsGateway.emitOrderUpdate(String(bestMatch.user.id), bestMatch.id, bestMatch.status);
     }
 
+    // Add back all skipped self-match orders to orderbook
+    for (const skippedOrder of skippedSelfMatches) {
+      await this.orderBookService.add(skippedOrder);
+    }
+
     const remaining = Number(remainingAmount);
 
     if (remaining > 0) {
@@ -284,11 +337,14 @@ export class MatchingEngineService implements OnModuleInit {
 
       try {
         await this.orderBookService.add(order);
-        this.logger.debug(
-          `Successfully added order ${order.id} to orderbook for symbol ${order.market.symbol}`,
+        this.logger.log(
+          `✅ Successfully added order ${order.id} (${order.side} ${order.market.symbol} @ ${order.price}) to orderbook`,
         );
       } catch (error) {
-        this.logger.error(`Failed to add order ${order.id} to orderbook:`, error);
+        this.logger.error(
+          `❌ Failed to add order ${order.id} (${order.side} ${order.market.symbol} @ ${order.price}) to orderbook:`,
+          error,
+        );
         // This is a critical error - an order that should be in the orderbook is not
         // But we continue processing to avoid blocking other orders
       }
@@ -306,17 +362,31 @@ export class MatchingEngineService implements OnModuleInit {
   private async processMarketOrder(order: Order): Promise<number> {
     const oppositeSide = order.side === OrderSide.BUY ? OrderSide.SELL : OrderSide.BUY;
     let remainingAmount = order.amount;
+    const skippedSelfMatches: Order[] = []; // Track self-match orders to add back later
 
     while (Number(remainingAmount) > 0) {
       const bestMatch = await this.orderBookService.getBest(order.market.symbol, oppositeSide);
 
       if (!bestMatch) {
+        // No more matches available, add back all skipped self-match orders
+        for (const skippedOrder of skippedSelfMatches) {
+          await this.orderBookService.add(skippedOrder);
+        }
+        skippedSelfMatches.length = 0; // Clear array
         break; // No match found
       }
 
       // Prevent self-matching (self-trade prevention)
+      // Continue to next best match instead of breaking
       if (bestMatch.user.id === order.user.id) {
-        break;
+        this.logger.debug(
+          `Self-trade prevention: skipping market order match for user ${order.user.id}, order ${order.id} vs ${bestMatch.id}, continuing to next match`,
+        );
+        // Temporarily remove self-match order from orderbook to skip it
+        skippedSelfMatches.push(bestMatch);
+        await this.orderBookService.remove(bestMatch);
+        // Continue to next iteration to find next best match
+        continue;
       }
 
       // Immediately remove the matched order from the book
@@ -351,6 +421,12 @@ export class MatchingEngineService implements OnModuleInit {
       // Emit WebSocket event to notify maker user about order status update
       this.wsGateway.emitOrderUpdate(String(bestMatch.user.id), bestMatch.id, bestMatch.status);
     }
+
+    // Add back all skipped self-match orders to orderbook
+    for (const skippedOrder of skippedSelfMatches) {
+      await this.orderBookService.add(skippedOrder);
+    }
+
     return Number(remainingAmount);
   }
 
@@ -381,8 +457,24 @@ export class MatchingEngineService implements OnModuleInit {
       return;
     }
 
+    // For market orders, makerOrder.price should always be valid (limit order)
+    // But add safety check to prevent NaN
     const tradePrice = Number(makerOrder.price);
+    if (!tradePrice || isNaN(tradePrice) || tradePrice <= 0) {
+      this.logger.error(
+        `Invalid trade price: makerOrder.price=${makerOrder.price}, orderId=${makerOrder.id}`,
+      );
+      return;
+    }
     const tradeValue = tradePrice * Number(matchedAmount);
+
+    // Validate tradeValue is not NaN
+    if (isNaN(tradeValue) || tradeValue <= 0) {
+      this.logger.error(
+        `Invalid trade value: tradePrice=${tradePrice}, matchedAmount=${matchedAmount}, orderId=${makerOrder.id}`,
+      );
+      return;
+    }
 
     // --- Ghi bản ghi Trade ---
     const buyOrder = takerOrder.side === OrderSide.BUY ? takerOrder : makerOrder;
@@ -442,42 +534,43 @@ export class MatchingEngineService implements OnModuleInit {
     }
 
     // --- Cập nhật ví khi có 2 user khác nhau ---
+    // Use WalletCalculationService for all balance updates
     if (takerOrder.side === OrderSide.BUY) {
-      // Buyer (taker)
-      buyerQuoteWallet.frozen = Number(buyerQuoteWallet.frozen) - Number(tradeValue);
-      buyerBaseWallet.available = Number(buyerBaseWallet.available) + Number(matchedAmount);
+      // Buyer (taker): Unlock frozen quote, add available base
+      this.walletCalculationService.subtractFromFrozen(buyerQuoteWallet, tradeValue);
+      this.walletCalculationService.addToAvailable(buyerBaseWallet, matchedAmount);
 
-      // Seller (maker)
-      sellerBaseWallet.frozen = Number(sellerBaseWallet.frozen) - Number(matchedAmount);
-      sellerQuoteWallet.available = Number(sellerQuoteWallet.available) + Number(tradeValue);
+      // Seller (maker): Unlock frozen base, add available quote
+      this.walletCalculationService.subtractFromFrozen(sellerBaseWallet, matchedAmount);
+      this.walletCalculationService.addToAvailable(sellerQuoteWallet, tradeValue);
     } else if (takerOrder.side === OrderSide.SELL) {
-      // Seller (taker)
-      sellerBaseWallet.frozen = Number(sellerBaseWallet.frozen) - Number(matchedAmount);
-      sellerQuoteWallet.available = Number(sellerQuoteWallet.available) + Number(tradeValue);
+      // Seller (taker): Unlock frozen base, add available quote
+      this.walletCalculationService.subtractFromFrozen(sellerBaseWallet, matchedAmount);
+      this.walletCalculationService.addToAvailable(sellerQuoteWallet, tradeValue);
 
-      // Buyer (maker)
-      buyerQuoteWallet.frozen = Number(buyerQuoteWallet.frozen) - Number(tradeValue);
-      buyerBaseWallet.available = Number(buyerBaseWallet.available) + Number(matchedAmount);
+      // Buyer (maker): Unlock frozen quote, add available base
+      this.walletCalculationService.subtractFromFrozen(buyerQuoteWallet, tradeValue);
+      this.walletCalculationService.addToAvailable(buyerBaseWallet, matchedAmount);
     }
 
-    // Đảm bảo không có giá trị âm
-    buyerQuoteWallet.frozen = Math.max(0, buyerQuoteWallet.frozen);
-    buyerBaseWallet.available = Math.max(0, buyerBaseWallet.available);
-    sellerBaseWallet.frozen = Math.max(0, sellerBaseWallet.frozen);
-    sellerQuoteWallet.available = Math.max(0, sellerQuoteWallet.available);
-
-    // --- Cập nhật lại balance ---
-    buyerQuoteWallet.balance = Number(buyerQuoteWallet.available) + Number(buyerQuoteWallet.frozen);
-    buyerBaseWallet.balance = Number(buyerBaseWallet.available) + Number(buyerBaseWallet.frozen);
-    sellerBaseWallet.balance = Number(sellerBaseWallet.available) + Number(sellerBaseWallet.frozen);
-    sellerQuoteWallet.balance =
-      Number(sellerQuoteWallet.available) + Number(sellerQuoteWallet.frozen);
+    // Recalculate all balances
+    this.walletCalculationService.recalculateBalances(
+      buyerQuoteWallet,
+      buyerBaseWallet,
+      sellerBaseWallet,
+      sellerQuoteWallet,
+    );
 
     // --- Kiểm tra an toàn ---
-    for (const w of [buyerQuoteWallet, buyerBaseWallet, sellerBaseWallet, sellerQuoteWallet]) {
-      if (w.frozen < 0 || w.available < 0) {
-        return;
-      }
+    if (
+      !this.walletCalculationService.areValidWallets(
+        buyerQuoteWallet,
+        buyerBaseWallet,
+        sellerBaseWallet,
+        sellerQuoteWallet,
+      )
+    ) {
+      return;
     }
 
     // --- Ghi thay đổi vào DB ---
@@ -604,7 +697,10 @@ export class MatchingEngineService implements OnModuleInit {
     this.wsGateway.emitBalanceUpdate(String(buyerUser.id));
     this.wsGateway.emitBalanceUpdate(String(sellerUser.id));
 
-    // Broadcast orderbook update to all subscribers
-    await this.wsGateway.broadcastOrderBookUpdate(market.symbol);
+    // Broadcast orderbook update to all subscribers (fire-and-forget to avoid blocking)
+    // This ensures trade execution completes quickly
+    this.wsGateway.broadcastOrderBookUpdate(market.symbol).catch((error) => {
+      this.logger.error(`Error broadcasting orderbook update after trade:`, error);
+    });
   }
 }

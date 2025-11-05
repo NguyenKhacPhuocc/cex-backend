@@ -1,8 +1,7 @@
-/* eslint-disable @typescript-eslint/no-unsafe-member-access */
 /* eslint-disable @typescript-eslint/no-misused-promises */
 /* eslint-disable @typescript-eslint/no-floating-promises */
 /* eslint-disable @typescript-eslint/no-unsafe-argument */
-/* eslint-disable @typescript-eslint/no-unsafe-assignment */
+
 /* eslint-disable @typescript-eslint/no-unsafe-return */
 import {
   BadRequestException,
@@ -27,6 +26,7 @@ import { OrderSide, OrderStatus, OrderType } from 'src/shared/enums';
 import { RedisService } from 'src/core/redis/redis.service';
 import { REDIS_KEYS } from 'src/common/constants/redis-keys';
 import { TradingWebSocketGateway } from 'src/core/websocket/websocket.gateway';
+import { WalletCalculationService } from 'src/common/services/wallet-calculation.service';
 
 @Injectable()
 export class OrderService implements OnModuleInit {
@@ -45,13 +45,14 @@ export class OrderService implements OnModuleInit {
     private walletRepo: Repository<Wallet>,
     @Inject(forwardRef(() => TradingWebSocketGateway))
     private readonly wsGateway: TradingWebSocketGateway,
+    private readonly walletCalculationService: WalletCalculationService,
   ) {}
 
   onModuleInit() {
     this.redisPubSub.subscribe(REDIS_KEYS.ORDER_UPDATE_CHANNEL); // đăng ký kênh lắng nghe cập nhật lệnh
     this.redisPubSub.onMessage(async (channel, message) => {
       if (channel === REDIS_KEYS.ORDER_UPDATE_CHANNEL) {
-        const userId = message.userId;
+        const userId = message.userId as string;
         const redisKey = REDIS_KEYS.USER_OPEN_ORDERS(userId);
         await this.redisService.del(redisKey);
       }
@@ -81,8 +82,8 @@ export class OrderService implements OnModuleInit {
     // Balance check and locking
     const walletToLock = WalletType.SPOT;
     const currencyToLock = side === OrderSide.BUY ? market.quoteAsset : market.baseAsset;
-    const amountToLock = side === OrderSide.BUY ? (price as number) * amount : amount;
 
+    // Get wallet first to check balance
     const wallet = await this.walletRepo.findOne({
       where: {
         user: { id: user.id },
@@ -91,12 +92,35 @@ export class OrderService implements OnModuleInit {
       },
     });
 
+    if (!wallet) {
+      throw new BadRequestException('Wallet not found');
+    }
+
+    // Calculate amount to lock
+    let amountToLock: number;
+    if (type === OrderType.MARKET && side === OrderSide.BUY) {
+      // Market BUY order: Lock entire available balance (since we don't know exact price)
+      // This ensures we have enough to cover the trade at any price
+      amountToLock = Number(wallet.available);
+
+      if (amountToLock <= 0) {
+        throw new BadRequestException('Insufficient balance');
+      }
+    } else {
+      // LIMIT order or MARKET SELL: Use calculated amount
+      amountToLock = side === OrderSide.BUY ? (price as number) * amount : amount;
+
+      if (!amountToLock || isNaN(amountToLock) || amountToLock <= 0) {
+        throw new BadRequestException('Invalid amount to lock');
+      }
+    }
+
     if (!wallet || wallet.available < amountToLock) {
       throw new BadRequestException('Insufficient balance');
     }
 
-    wallet.available = Number(wallet.available) - amountToLock;
-    wallet.frozen = Number(wallet.frozen) + amountToLock;
+    // Use WalletCalculationService for balance locking
+    this.walletCalculationService.lockBalance(wallet, amountToLock);
     await this.walletRepo.save(wallet);
 
     try {
@@ -119,6 +143,11 @@ export class OrderService implements OnModuleInit {
         user: { id: user.id },
       };
       await this.orderQueue.enqueue(market.symbol, orderWithMarket as any);
+
+      // Emit WebSocket event immediately after order creation
+      // This allows frontend to show order in "pending orders" table immediately
+      // without waiting for matching engine to process it
+      this.wsGateway.emitOrderUpdate(String(user.id), savedOrder.id, OrderStatus.OPEN);
 
       // Publish message to invalidate cache for user's open orders
       await this.redisPubSub.publish(REDIS_KEYS.ORDER_UPDATE_CHANNEL, {
@@ -163,8 +192,9 @@ export class OrderService implements OnModuleInit {
         user: { id: user.id },
         status: Not(In([OrderStatus.OPEN])),
       },
-      relations: ['market'], // nếu muốn lấy thêm thông tin market
+      relations: ['market'],
       order: { createdAt: 'DESC' },
+      take: 50, // Pagination to prevent loading too many records
     });
     return orders;
   }
@@ -175,10 +205,10 @@ export class OrderService implements OnModuleInit {
         id: orderId,
         user: { id: user.id },
       },
-      relations: ['market'], // nếu muốn lấy thêm thông tin market
+      relations: ['market'],
     });
     if (!order) {
-      throw new NotFoundException(`Order with id ${orderId} not found`);
+      throw new NotFoundException(`Order not found`);
     }
     return order;
   }
@@ -191,7 +221,10 @@ export class OrderService implements OnModuleInit {
     }
 
     // Gửi tín hiệu đến matching engine để xóa khỏi orderbook
-    await this.redisPubSub.publish(REDIS_KEYS.ORDER_CANCEL_CHANNEL, order);
+    await this.redisPubSub.publish(
+      REDIS_KEYS.ORDER_CANCEL_CHANNEL,
+      order as unknown as Record<string, unknown>,
+    );
 
     // Transaction đảm bảo đồng bộ
     await this.dataSource.transaction(async (manager) => {
@@ -258,7 +291,10 @@ export class OrderService implements OnModuleInit {
       const amountsToUnlock = new Map<string, number>();
 
       for (const order of openOrders) {
-        await this.redisPubSub.publish(REDIS_KEYS.ORDER_CANCEL_CHANNEL, order);
+        await this.redisPubSub.publish(
+          REDIS_KEYS.ORDER_CANCEL_CHANNEL,
+          order as unknown as Record<string, unknown>,
+        );
         order.status = OrderStatus.CANCELED;
 
         const remainingAmount = order.amount - order.filled;
@@ -321,7 +357,10 @@ export class OrderService implements OnModuleInit {
       const amountsToUnlock = new Map<string, number>();
 
       for (const order of openOrders) {
-        await this.redisPubSub.publish(REDIS_KEYS.ORDER_CANCEL_CHANNEL, order);
+        await this.redisPubSub.publish(
+          REDIS_KEYS.ORDER_CANCEL_CHANNEL,
+          order as unknown as Record<string, unknown>,
+        );
         order.status = OrderStatus.CANCELED;
 
         const remainingAmount = order.amount - order.filled;

@@ -57,7 +57,7 @@ export class RedisModule implements OnModuleDestroy {
     @Inject('REDIS_PUB_CLIENT') private readonly redisPubClient: Redis,
     @Inject('REDIS_SUB_CLIENT') private readonly redisSubClient: Redis,
   ) {
-    console.log('RedisModule initialized with 3 clients.');
+    this.logger.log('RedisModule initialized with 3 clients (general, pub, sub)');
   }
 
   async onModuleDestroy() {

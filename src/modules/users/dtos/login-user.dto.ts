@@ -1,11 +1,10 @@
-/* eslint-disable prettier/prettier */
 // login.dto.ts
 import { IsEmail, IsString } from 'class-validator';
 
 export class LoginUserDto {
-  @IsEmail()
+  @IsEmail({}, { message: 'Invalid email format' })
   email: string;
 
-  @IsString()
+  @IsString({ message: 'Password must be a string' })
   password: string;
 }

@@ -17,7 +17,7 @@ export class TransactionsService {
   ) {}
 
   // lấy tất cả giao dịch của người dùng
-  async getAllTransactions(userId: number): Promise<Transaction[]> {
+  async getAllTransactions(userId: string): Promise<Transaction[]> {
     return this.transactionRepo.find({
       where: {
         user: { id: userId },
@@ -25,7 +25,7 @@ export class TransactionsService {
     });
   }
 
-  async getTransactionById(id: string, userId: number): Promise<Transaction | null> {
+  async getTransactionById(id: string, userId: string): Promise<Transaction | null> {
     return this.transactionRepo.findOne({
       where: {
         id,

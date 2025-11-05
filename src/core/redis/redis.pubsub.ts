@@ -1,7 +1,9 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment */
-/* eslint-disable @typescript-eslint/no-unsafe-member-access */
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Redis } from 'ioredis';
+
+interface PubSubMessage {
+  [key: string]: unknown;
+}
 
 @Injectable()
 export class RedisPubSub {
@@ -12,17 +14,18 @@ export class RedisPubSub {
     @Inject('REDIS_SUB_CLIENT') private readonly subClient: Redis,
   ) {
     this.subClient.on('error', (err) => this.logger.error(`Sub Client Error: ${err}`));
-    this.subClient.on('ready', () => console.log('Redis Pub/Sub Subscriber is ready.'));
+    this.subClient.on('ready', () => this.logger.debug('Redis Pub/Sub Subscriber ready'));
   }
 
-  async publish(channel: string, message: any): Promise<number> {
+  async publish(channel: string, message: PubSubMessage): Promise<number> {
     try {
       const payload = JSON.stringify(message);
       const listeners = await this.pubClient.publish(channel, payload);
       return listeners;
     } catch (error) {
-      this.logger.error(`Error publishing to channel ${channel}: ${error.message}`);
-      throw error; // Nên throw để các service gọi publish có thể xử lý lỗi
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`Error publishing to channel ${channel}: ${errorMsg}`);
+      throw error;
     }
   }
 
@@ -30,20 +33,21 @@ export class RedisPubSub {
     try {
       await this.subClient.subscribe(channel);
     } catch (error) {
-      this.logger.error(`Error subscribing to channel ${channel}: ${error.message}`);
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      this.logger.error(`Error subscribing to channel ${channel}: ${errorMsg}`);
       throw error;
     }
   }
 
-  onMessage(callback: (channel: string, message: any) => void) {
-    this.subClient.on('message', (channel, message) => {
+  onMessage(callback: (channel: string, message: PubSubMessage) => void): void {
+    this.subClient.on('message', (channel: string, message: string) => {
       try {
-        const parsedMessage = JSON.parse(message);
+        const parsedMessage = JSON.parse(message) as PubSubMessage;
         callback(channel, parsedMessage);
       } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : 'Unknown error';
         this.logger.error(
-          `[RedisPubSub] Error parsing JSON message on channel ${channel}: ${message}`,
-          error.stack,
+          `Error parsing JSON message on channel ${channel}: ${errorMsg} (raw: ${message})`,
         );
       }
     });

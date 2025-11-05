@@ -22,6 +22,7 @@ import { CandlesModule } from './modules/candles/candles.module';
 import { BinanceModule } from './modules/binance/binance.module';
 import { BotModule } from './modules/bot/bot.module';
 import { ThrottlerModule } from '@nestjs/throttler';
+import { CommonModule } from './common/common.module';
 // import { APP_GUARD } from '@nestjs/core';
 // import { CustomThrottlerGuard } from './common/guards/custom-throttler.guard';
 @Module({
@@ -29,6 +30,7 @@ import { ThrottlerModule } from '@nestjs/throttler';
     ConfigModule.forRoot({
       isGlobal: true, // Cho phép sử dụng ConfigService ở mọi nơi
     }),
+    CommonModule,
     // Rate Limiting - Global configuration
     ThrottlerModule.forRoot([
       {

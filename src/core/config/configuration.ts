@@ -6,13 +6,6 @@ export default () => {
   const dbUrl =
     process.env.DATABASE_URL ||
     `postgres://${process.env.DB_USERNAME}:${process.env.DB_PASSWORD}@${process.env.DB_HOST}:${process.env.DB_PORT}/${process.env.DB_DATABASE}`;
-  // Accept both postgres:// and postgresql:// formats (pg package supports both)
-  // Also accept query parameters (e.g., ?sslmode=require) and optional port
-  // Formats supported:
-  // - postgresql://user:pass@host:port/db
-  // - postgresql://user:pass@host/db (default port 5432)
-  // - postgresql://user:pass@host:port/db?sslmode=require
-  // - postgresql://user:pass@host/db?sslmode=require
   if (!dbUrl.match(/^postgres(ql)?:\/\/[^:]+:[^@]*@[^:]+(?::\d+)?\/[^/\s?]+(\?.*)?$/)) {
     throw new Error(
       'Invalid DATABASE_URL format. Expected: postgresql://user:password@host:port/db or postgresql://user:password@host/db?sslmode=require',

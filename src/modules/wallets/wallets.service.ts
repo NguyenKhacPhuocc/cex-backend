@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { FindOptionsWhere, Repository, Between } from 'typeorm';
 import { Wallet } from './entities/wallet.entity';
 import { User } from '../users/entities/user.entity';
+import { WalletCalculationService } from 'src/common/services/wallet-calculation.service';
 import {
   Transaction,
   TransactionStatus,
@@ -24,9 +25,10 @@ export class WalletsService {
     private transactionRepo: Repository<Transaction>,
     @InjectRepository(LedgerEntry)
     private ledgerRepo: Repository<LedgerEntry>,
+    private readonly walletCalculationService: WalletCalculationService,
   ) {}
 
-  async depositToUser(userId: number, walletTransactionDto: WalletTransactionDto): Promise<Wallet> {
+  async depositToUser(userId: string, walletTransactionDto: WalletTransactionDto): Promise<Wallet> {
     const { walletType, currency, amount } = walletTransactionDto;
     const user = await this.userRepo.findOne({ where: { id: userId } });
     if (!user) throw new NotFoundException('User not found');
@@ -89,7 +91,7 @@ export class WalletsService {
     return wallet;
   }
 
-  async withdrawFromUser(userId: number, walletTransactionDto: WalletTransactionDto) {
+  async withdrawFromUser(userId: string, walletTransactionDto: WalletTransactionDto) {
     const { walletType, currency, amount } = walletTransactionDto;
     const user = await this.userRepo.findOne({ where: { id: userId } });
     if (!user) throw new NotFoundException('User not found');
@@ -143,7 +145,7 @@ export class WalletsService {
     return wallet;
   }
 
-  async transferBetweenWallets(userId: number, transferDto: TransferDto): Promise<void> {
+  async transferBetweenWallets(userId: string, transferDto: TransferDto): Promise<void> {
     const { fromWalletType, toWalletType, currency, amount } = transferDto;
 
     if (fromWalletType === toWalletType) {
@@ -188,11 +190,9 @@ export class WalletsService {
       const fromBalanceBefore = fromWallet.balance;
       const toBalanceBefore = toWalletInstance.balance;
 
-      fromWallet.balance = Number(fromWallet.balance) - Number(amount);
-      fromWallet.available = Number(fromWallet.available) - Number(amount);
-
-      toWalletInstance.balance = Number(toWalletInstance.balance) + Number(amount);
-      toWalletInstance.available = Number(toWalletInstance.available) + Number(amount);
+      // Use WalletCalculationService for balance transfers
+      this.walletCalculationService.subtractFromAvailable(fromWallet, amount);
+      this.walletCalculationService.addToAvailable(toWalletInstance, amount);
 
       await transactionalEntityManager.save(fromWallet);
       await transactionalEntityManager.save(toWalletInstance);
@@ -237,7 +237,7 @@ export class WalletsService {
     });
   }
 
-  async getWalletHistory(userId: number, query: HistoryQueryDto) {
+  async getWalletHistory(userId: string, query: HistoryQueryDto) {
     const page = parseInt(query.page || '1', 10);
     const limit = parseInt(query.limit || '10', 10);
     const skip = (page - 1) * limit;
@@ -275,7 +275,7 @@ export class WalletsService {
   /**
    * Lấy tất cả wallets của user theo walletType
    */
-  async getWalletsByType(userId: number, walletType: string): Promise<Wallet[]> {
+  async getWalletsByType(userId: string, walletType: string): Promise<Wallet[]> {
     return this.walletRepo.find({
       where: {
         user: { id: userId },

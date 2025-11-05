@@ -13,7 +13,7 @@ import {
 @Entity('trades')
 export class Trade {
   @PrimaryGeneratedColumn('uuid')
-  id: number;
+  id: string;
 
   @ManyToOne(() => Market, (market) => market.trades, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'market_id' })

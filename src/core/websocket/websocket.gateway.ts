@@ -288,7 +288,7 @@ export class TradingWebSocketGateway
 
     // Send initial snapshot
     try {
-      const snapshot = await this.orderBookService.getOrderBookSnapshot(symbol, 20);
+      const snapshot = await this.orderBookService.getOrderBookSnapshot(symbol, 100);
       client.emit('orderbook:snapshot', snapshot);
     } catch (error) {
       this.logger.error(`Error fetching orderbook snapshot for ${symbol}:`, error);
@@ -323,7 +323,8 @@ export class TradingWebSocketGateway
     }
 
     try {
-      const snapshot = await this.orderBookService.getOrderBookSnapshot(symbol, 20);
+      // Use same depth as initial snapshot (200) to ensure consistency
+      const snapshot = await this.orderBookService.getOrderBookSnapshot(symbol, 100);
 
       // Emit to all subscribers
       subscribers.forEach((socketId) => {

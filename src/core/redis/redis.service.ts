@@ -34,6 +34,10 @@ export class RedisService {
     return this.client.lpush(key, ...values);
   }
 
+  async rpop(key: string): Promise<string | null> {
+    return this.client.rpop(key);
+  }
+
   async brpop(key: string, timeout = 0): Promise<[string, string] | null> {
     return this.client.brpop(key, timeout);
   }

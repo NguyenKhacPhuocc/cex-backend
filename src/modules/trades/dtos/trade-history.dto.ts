@@ -4,7 +4,7 @@ export class CounterpartyDto {
 }
 
 export class TradeHistoryDto {
-  id: number;
+  id: string;
   market: string;
   side: 'BUY' | 'SELL';
   price: number;

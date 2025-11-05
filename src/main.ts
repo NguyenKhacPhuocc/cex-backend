@@ -3,7 +3,7 @@ import { AppModule } from './app.module';
 import { ConfigService } from '@nestjs/config';
 import { env } from 'process';
 import { DataSource } from 'typeorm';
-import { ValidationPipe } from '@nestjs/common';
+import { ValidationPipe, Logger as NestLogger } from '@nestjs/common';
 import { ThrottlerExceptionFilter } from './common/filters/throttler-exception.filter';
 import { ExcludePasswordInterceptor } from './common/interceptors/exclude-password.interceptor';
 import cookieParser from 'cookie-parser';
@@ -45,15 +45,16 @@ function getCorsOrigins(): string[] {
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+  const logger = new NestLogger('Bootstrap');
 
-  // Enable cookie parser - QUAN TRỌNG để đọc/set cookies!
+  // Enable cookie parser - required for reading/setting cookies
   app.use(cookieParser());
 
   // Get normalized CORS origins
   const corsOrigins = getCorsOrigins();
-  console.log('CORS allowed origins:', corsOrigins);
+  logger.log(`CORS allowed origins: ${corsOrigins.join(', ')}`);
 
-  // Enable CORS với cấu hình đầy đủ
+  // Enable CORS with full configuration
   app.enableCors({
     origin: (
       origin: string | undefined,
@@ -77,11 +78,11 @@ async function bootstrap() {
       ) {
         callback(null, true);
       } else {
-        console.warn('CORS blocked origin:', origin);
+        logger.warn(`CORS blocked origin: ${origin}`);
         callback(new Error('Not allowed by CORS'));
       }
     },
-    credentials: true, // Cho phép gửi cookies
+    credentials: true, // Allow sending cookies
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
     exposedHeaders: ['Set-Cookie'],
@@ -93,33 +94,36 @@ async function bootstrap() {
   // Apply custom throttler exception filter for friendly error messages
   app.useGlobalFilters(new ThrottlerExceptionFilter());
 
-  // 🔐 SECURITY: Tự động loại bỏ password/passwordHash khỏi mọi responses
+  // Security: Automatically exclude password/passwordHash from all responses
   app.useGlobalInterceptors(new ExcludePasswordInterceptor());
 
-  // tất cả route có tiền tố /api
+  // All routes prefixed with /api
   app.setGlobalPrefix('api');
 
-  // Kiểm tra kết nối database
+  // Check database connection
   try {
-    const dataSource = app.get<DataSource>(DataSource); // Sử dụng DI để lấy DataSource
+    const dataSource = app.get<DataSource>(DataSource);
     if (dataSource.isInitialized) {
-      console.log('Kết nối cơ sở dữ liệu thành công!');
+      logger.log('Database connection established successfully');
     } else {
       await dataSource.initialize();
-      console.log('Kết nối cơ sở dữ liệu thành công!');
+      logger.log('Database connection established successfully');
     }
   } catch (error) {
-    console.error('Lỗi khi kết nối cơ sở dữ liệu:', error);
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    logger.error(`Failed to connect to database: ${errorMsg}`);
     process.exit(1);
   }
 
   const configService = app.get(ConfigService);
   const port = env.PORT || configService.get<number>('port') || 3000;
   await app.listen(port);
-  console.log(`Application is running on: http://localhost:${port}`);
+  logger.log(`Application running on: http://localhost:${port}`);
+  logger.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
 }
 
 bootstrap().catch((err) => {
-  console.error('Error during bootstrap', err);
+  const logger = new NestLogger('Bootstrap');
+  logger.error(`Failed to bootstrap application: ${err instanceof Error ? err.message : err}`);
   process.exit(1);
 });

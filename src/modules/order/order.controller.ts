@@ -18,8 +18,10 @@ export class OrderController {
   @Roles(UserRole.USER)
   async createOrder(@GetUser() user: User, @Body() createOrderDto: CreateOrderDto) {
     const order = await this.orderService.createOrder(user, createOrderDto);
+    // Reload order with market relation to ensure frontend gets full data
+    const orderWithRelations = await this.orderService.getOrderById(user, order.id);
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const { user: _, ...result } = order;
+    const { user: _, ...result } = orderWithRelations;
     return {
       ...result,
     };

@@ -1,14 +1,16 @@
-/* eslint-disable @typescript-eslint/no-unsafe-argument */
 /* eslint-disable @typescript-eslint/no-unused-vars */
-/* eslint-disable @typescript-eslint/no-unsafe-member-access */
-/* eslint-disable @typescript-eslint/no-unsafe-assignment */
+/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument */
 import { Injectable, BadRequestException, UnauthorizedException } from '@nestjs/common';
 import { LoginUserDto } from '../users/dtos/login-user.dto';
 import { RegisterUserDto } from '../users/dtos/register-user.dto';
 import { UserService } from '../users/users.service';
 import { JwtService } from '@nestjs/jwt';
-import bcrypt from 'node_modules/bcryptjs';
+import * as bcrypt from 'bcryptjs';
 import { User } from '../users/entities/user.entity';
+
+interface RefreshTokenPayload {
+  sub: string;
+}
 
 @Injectable()
 export class AuthService {
@@ -22,7 +24,7 @@ export class AuthService {
     const payload = {
       email: user.email,
       sub: user.id,
-      role: user.role, // ✅ Include role trong token
+      role: user.role,
     };
     return this.jwtService.sign(payload, {
       secret: process.env.JWT_ACCESS_SECRET,
@@ -41,7 +43,7 @@ export class AuthService {
 
   async register(dto: RegisterUserDto): Promise<{ message: string; user: Partial<User> }> {
     const existing = await this.userService.findByEmail(dto.email);
-    if (existing) throw new BadRequestException('Email already registered');
+    if (existing) throw new BadRequestException('User with this email already exists');
 
     const hashed = await bcrypt.hash(dto.password, 10);
     const user = await this.userService.createUser({
@@ -65,10 +67,10 @@ export class AuthService {
     refreshToken: string;
   }> {
     const user = await this.userService.findByEmail(dto.email);
-    if (!user) throw new UnauthorizedException('Email hoặc mật khẩu không đúng');
+    if (!user) throw new UnauthorizedException('Invalid email or password');
 
     const match = await bcrypt.compare(dto.password, user.passwordHash);
-    if (!match) throw new UnauthorizedException('Email hoặc mật khẩu không đúng');
+    if (!match) throw new UnauthorizedException('Invalid email or password');
 
     const accessToken = this.generateAccessToken(user);
     const refreshToken = this.generateRefreshToken(user);

@@ -21,7 +21,7 @@ const getSSLConfig = (): boolean | object => {
     return { rejectUnauthorized: false };
   }
 
-  // Fallback: Enable SSL for production (most cloud databases require SSL)
+  // Enable SSL for production (most cloud databases require SSL)
   if (process.env.NODE_ENV === 'production') {
     return { rejectUnauthorized: false };
   }
@@ -32,14 +32,18 @@ const getSSLConfig = (): boolean | object => {
 export const databaseConfig: TypeOrmModuleOptions = {
   type: 'postgres',
   url: process.env.DATABASE_URL,
-  // Allow synchronize in production if explicitly enabled (for initial setup)
-  // After tables are created, set DB_SYNCHRONIZE=false and use migrations instead
+  // Synchronize schema with entities (enabled in development, disabled in production)
+  // For production: use migrations instead
   synchronize: process.env.DB_SYNCHRONIZE === 'true' || process.env.NODE_ENV === 'development',
-  // logging: process.env.NODE_ENV === 'development',
   entities: [User, UserProfile, Wallet, Transaction, LedgerEntry, Order, Trade, Market, Candle],
-  // migrations: ['src/migrations/*.ts'],
-  // migrationsRun: true,
   // Enable SSL if URL contains sslmode=require or if in production
   ssl: getSSLConfig(),
   schema: 'public',
+  // Connection pool settings for better performance
+  extra: {
+    max: 20, // Maximum pool size
+    min: 2, // Minimum pool size
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 2000,
+  },
 };

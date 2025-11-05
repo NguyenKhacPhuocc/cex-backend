@@ -1,6 +1,4 @@
-/* eslint-disable @typescript-eslint/no-unsafe-call */
-/* eslint-disable @typescript-eslint/no-unsafe-member-access */
-/* eslint-disable @typescript-eslint/no-unsafe-assignment */
+/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access */
 import { Injectable } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy, StrategyOptions } from 'passport-jwt';
@@ -8,25 +6,31 @@ import { UserRole } from 'src/modules/users/entities/user.entity';
 import { Request } from 'express';
 
 export interface JwtPayload {
-  sub: number;
+  sub: string;
   email: string;
   role: UserRole;
 }
 
-// Custom extractor: Lấy token từ cookie HOẶC Authorization header (backward compatible)
-const cookieExtractor = (req: Request): string | null => {
-  let token = null;
+// Custom extractor: Extract token from cookie OR Authorization header (backward compatible)
 
-  // Priority 1: Lấy từ cookie (secure)
-  if (req && req.cookies) {
-    token = req.cookies['accessToken'];
+const cookieExtractor = (req: Request): string | null => {
+  let token: string | null = null;
+
+  // Priority 1: Get from cookie (secure)
+  if (req?.cookies && typeof req.cookies === 'object') {
+    token = (req.cookies as Record<string, string>)['accessToken'] ?? null;
   }
 
   // Priority 2: Fallback to Authorization header (for backward compatibility)
-  if (!token && req.headers.authorization) {
-    const bearerToken = ExtractJwt.fromAuthHeaderAsBearerToken()(req);
-    if (bearerToken) {
-      token = bearerToken;
+  if (!token && req?.headers?.authorization) {
+    try {
+      const bearerExtractor = ExtractJwt.fromAuthHeaderAsBearerToken();
+      const bearerToken = bearerExtractor(req);
+      if (bearerToken && typeof bearerToken === 'string') {
+        token = bearerToken;
+      }
+    } catch {
+      // Silent fail, no bearer token found
     }
   }
 
@@ -43,8 +47,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     super(options);
   }
 
-  // eslint-disable-next-line @typescript-eslint/require-await
-  async validate(payload: JwtPayload): Promise<{ id: number; email: string; role: UserRole }> {
+  validate(payload: JwtPayload): { id: string; email: string; role: UserRole } {
     return { id: payload.sub, email: payload.email, role: payload.role };
   }
 }
