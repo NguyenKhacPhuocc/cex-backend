@@ -25,6 +25,8 @@ export class CandlesService {
   constructor(
     @InjectRepository(Candle)
     private candleRepository: Repository<Candle>,
+    @InjectRepository(Trade)
+    private tradeRepository: Repository<Trade>,
   ) {}
 
   /**
@@ -168,25 +170,69 @@ export class CandlesService {
     to?: Date,
     limit: number = 500,
   ): Promise<CandleDto[]> {
-    const query = this.candleRepository
-      .createQueryBuilder('candle')
-      .where('candle.symbol = :symbol', { symbol })
-      .andWhere('candle.timeframe = :timeframe', { timeframe })
-      .orderBy('candle.timestamp', 'DESC');
+    // Helper function to build query (reusable)
+    const buildQuery = () => {
+      const q = this.candleRepository
+        .createQueryBuilder('candle')
+        .where('candle.symbol = :symbol', { symbol })
+        .andWhere('candle.timeframe = :timeframe', { timeframe })
+        .orderBy('candle.timestamp', 'DESC');
 
-    if (from) {
-      query.andWhere('candle.timestamp >= :from', { from });
+      if (from) {
+        q.andWhere('candle.timestamp >= :from', { from });
+      }
+
+      if (to) {
+        q.andWhere('candle.timestamp <= :to', { to });
+      }
+
+      if (limit) {
+        q.limit(limit);
+      }
+
+      return q;
+    };
+
+    let candles = await buildQuery().getMany();
+
+    // Log for debugging
+    this.logger.debug(`getCandles: Found ${candles.length} candles for ${symbol} ${timeframe}`);
+
+    // Auto-backfill if no candles found for timeframes that might need backfill
+    // This ensures these timeframes have data even if they weren't aggregated before
+    // Includes 30m, 1h, 4h, 1d, 1w (these might not have been aggregated initially)
+    if (
+      candles.length === 0 &&
+      [
+        Timeframe.THIRTY_MINUTES,
+        Timeframe.ONE_HOUR,
+        Timeframe.FOUR_HOURS,
+        Timeframe.ONE_DAY,
+        Timeframe.ONE_WEEK,
+      ].includes(timeframe)
+    ) {
+      this.logger.log(`No candles found for ${symbol} ${timeframe}, attempting auto-backfill...`);
+      try {
+        const backfillResults = await this.backfillCandles(symbol, [timeframe]);
+        if (backfillResults.length > 0 && backfillResults[0].created > 0) {
+          this.logger.log(
+            `Auto-backfilled ${backfillResults[0].created} candles for ${symbol} ${timeframe}`,
+          );
+          // Re-query after backfill using a fresh query builder to get the newly created candles
+          candles = await buildQuery().getMany();
+          this.logger.debug(
+            `After backfill: Found ${candles.length} candles for ${symbol} ${timeframe}`,
+          );
+        } else {
+          this.logger.warn(
+            `Backfill completed but no candles were created for ${symbol} ${timeframe}. This might mean there are no trades in the database.`,
+          );
+        }
+      } catch (error) {
+        this.logger.error(`Error during auto-backfill for ${symbol} ${timeframe}:`, error);
+        // Don't throw - return empty array if backfill fails
+      }
     }
-
-    if (to) {
-      query.andWhere('candle.timestamp <= :to', { to });
-    }
-
-    if (limit) {
-      query.limit(limit);
-    }
-
-    const candles = await query.getMany();
 
     // Reverse to get chronological order (lightweight-charts expects oldest first)
     candles.reverse();
@@ -200,6 +246,63 @@ export class CandlesService {
       close: Number(candle.close),
       volume: Number(candle.volume),
     }));
+  }
+
+  /**
+   * Backfill candles for a symbol and specific timeframes from existing trades
+   * This is useful when new timeframes are added and we need historical data
+   */
+  async backfillCandles(
+    symbol: string,
+    timeframes: Timeframe[],
+  ): Promise<{ timeframe: Timeframe; created: number }[]> {
+    this.logger.log(`Starting backfill for ${symbol} with timeframes: ${timeframes.join(', ')}`);
+
+    const results: { timeframe: Timeframe; created: number }[] = [];
+
+    // Get all trades for this symbol, ordered by timestamp
+    const trades = await this.tradeRepository.find({
+      where: { market: { symbol } },
+      relations: ['market'],
+      order: { timestamp: 'ASC' },
+    });
+
+    if (trades.length === 0) {
+      this.logger.warn(`No trades found for ${symbol}, nothing to backfill`);
+      return results;
+    }
+
+    this.logger.log(`Found ${trades.length} trades for ${symbol}`);
+
+    // Process each timeframe
+    for (const timeframe of timeframes) {
+      let created = 0;
+
+      // Process each trade
+      for (const trade of trades) {
+        const candle = await this.aggregateTradeToCandleSingle(trade, timeframe);
+        if (candle) {
+          // Check if candle already exists
+          const existing = await this.candleRepository.findOne({
+            where: {
+              symbol: trade.market.symbol,
+              timeframe,
+              timestamp: candle.timestamp,
+            },
+          });
+
+          if (!existing) {
+            await this.candleRepository.save(candle);
+            created++;
+          }
+        }
+      }
+
+      results.push({ timeframe, created });
+      this.logger.log(`Backfilled ${created} candles for ${symbol} ${timeframe}`);
+    }
+
+    return results;
   }
 
   /**

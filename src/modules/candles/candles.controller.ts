@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Query, ParseEnumPipe } from '@nestjs/common';
+import { Controller, Get, Param, Query, ParseEnumPipe, Post, Body } from '@nestjs/common';
 import { CandlesService } from './candles.service';
 import { Timeframe } from './entities/candle.entity';
 
@@ -29,5 +29,13 @@ export class CandlesController {
     @Query('timeframe', new ParseEnumPipe(Timeframe)) timeframe: Timeframe,
   ) {
     return this.candlesService.getCurrentCandle(symbol, timeframe);
+  }
+
+  @Post(':symbol/backfill')
+  async backfillCandles(
+    @Param('symbol') symbol: string,
+    @Body('timeframes') timeframes: Timeframe[],
+  ) {
+    return this.candlesService.backfillCandles(symbol, timeframes);
   }
 }

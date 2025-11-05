@@ -666,7 +666,11 @@ export class MatchingEngineService implements OnModuleInit {
         Timeframe.ONE_MINUTE,
         Timeframe.FIVE_MINUTES,
         Timeframe.FIFTEEN_MINUTES,
+        Timeframe.THIRTY_MINUTES,
         Timeframe.ONE_HOUR,
+        Timeframe.FOUR_HOURS,
+        Timeframe.ONE_DAY,
+        Timeframe.ONE_WEEK,
       ])
       .then((aggregatedCandles) => {
         // Broadcast candle updates for each timeframe
