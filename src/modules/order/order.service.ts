@@ -101,7 +101,7 @@ export class OrderService implements OnModuleInit {
     if (type === OrderType.MARKET && side === OrderSide.BUY) {
       // Market BUY order: Lock entire available balance (since we don't know exact price)
       // This ensures we have enough to cover the trade at any price
-      amountToLock = Number(wallet.available);
+      amountToLock = side === OrderSide.BUY ? (price as number) * amount : amount;
 
       if (amountToLock <= 0) {
         throw new BadRequestException('Insufficient balance');
@@ -233,7 +233,7 @@ export class OrderService implements OnModuleInit {
   async cancelOrder(user: User, orderId: string) {
     const order = await this.getOrderById(user, orderId);
 
-    if (order.status !== OrderStatus.OPEN) {
+    if (order.status !== OrderStatus.OPEN && order.status !== OrderStatus.PARTIALLY_FILLED) {
       throw new BadRequestException(`Cannot cancel order with status ${order.status}`);
     }
 

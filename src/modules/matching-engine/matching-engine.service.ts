@@ -150,7 +150,17 @@ export class MatchingEngineService implements OnModuleInit {
     if (remainingAmount <= 0) {
       order.status = OrderStatus.FILLED;
     } else if (remainingAmount < order.amount) {
-      order.status = OrderStatus.PARTIALLY_FILLED;
+      // For market orders, if not fully filled, cancel the remaining amount
+      if (order.type === OrderType.MARKET) {
+        order.status = OrderStatus.CANCELED;
+        this.logger.log(
+          `Market order ${order.id} partially filled, canceling remaining ${remainingAmount} amount`,
+        );
+        // Emit WebSocket event to notify user about cancellation
+        this.wsGateway.emitOrderUpdate(String(order.user.id), order.id, OrderStatus.CANCELED);
+      } else {
+        order.status = OrderStatus.PARTIALLY_FILLED;
+      }
     } else {
       order.status = OrderStatus.OPEN;
     }
@@ -173,14 +183,17 @@ export class MatchingEngineService implements OnModuleInit {
 
     await this.orderRepo.save(newOrderEntity);
 
-    // For market BUY orders: Unlock remaining frozen balance that wasn't used
-    // Market BUY locks entire available balance, but only uses tradeValue
+    // For market orders: Unlock remaining frozen balance that wasn't used
+    // Market orders lock balance, but may not use all of it if partially filled or canceled
     if (
       order.type === OrderType.MARKET &&
-      order.side === OrderSide.BUY &&
-      order.status !== OrderStatus.OPEN
+      order.status !== OrderStatus.OPEN &&
+      remainingAmount > 0
     ) {
-      const currencyToUnlock = order.market.quoteAsset;
+      // For market BUY: unlock remaining quoteAsset (USDT)
+      // For market SELL: unlock remaining baseAsset (BTC)
+      const currencyToUnlock =
+        order.side === OrderSide.BUY ? order.market.quoteAsset : order.market.baseAsset;
       const wallet = await this.walletRepo.findOne({
         where: {
           user: { id: order.user.id },
@@ -190,17 +203,29 @@ export class MatchingEngineService implements OnModuleInit {
       });
 
       if (wallet && Number(wallet.frozen) > 0) {
-        // Calculate total trade value used (from filled amount)
-        // We need to estimate from filled amount since we don't track exact trade values
-        // For simplicity, unlock all remaining frozen (since order is filled/partially filled)
-        // The actual unlocking happens in executeTrade, but we need to handle remaining frozen
-        const remainingFrozen = Number(wallet.frozen);
-        if (remainingFrozen > 0) {
-          this.walletCalculationService.unlockBalance(wallet, remainingFrozen);
+        // Calculate remaining amount to unlock
+        // For BUY: remainingAmount * estimatedPrice (or use order.price if set)
+        // For SELL: remainingAmount (baseAsset)
+        let amountToUnlock = 0;
+        if (order.side === OrderSide.BUY) {
+          // Estimate price from filled trades or use order.price
+          const estimatedPrice = order.price || 0;
+          amountToUnlock = Number(remainingAmount) * estimatedPrice;
+        } else {
+          // For SELL, remainingAmount is in baseAsset
+          amountToUnlock = Number(remainingAmount);
+        }
+
+        // Unlock the calculated amount (but don't exceed frozen balance)
+        const actualUnlock = Math.min(amountToUnlock, Number(wallet.frozen));
+        if (actualUnlock > 0) {
+          this.walletCalculationService.unlockBalance(wallet, actualUnlock);
           await this.walletRepo.save(wallet);
           this.logger.debug(
-            `Unlocked remaining frozen balance for market BUY order ${order.id}: ${remainingFrozen} ${currencyToUnlock}`,
+            `Unlocked remaining frozen balance for market ${order.side} order ${order.id}: ${actualUnlock} ${currencyToUnlock}`,
           );
+          // Emit balance update to notify frontend about unlocked balance
+          this.wsGateway.emitBalanceUpdate(String(order.user.id));
         }
       }
     }
