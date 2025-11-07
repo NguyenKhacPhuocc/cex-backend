@@ -1,14 +1,17 @@
 import { BaseStrategy, Action, TickerData } from './base-strategy';
 import { OrderSide } from 'src/shared/enums';
 
-export class MarketMakerStrategy extends BaseStrategy {
-  private readonly spreadPercent: number;
+/**
+ * Market Order Bot Strategy
+ * 30% of bots use this strategy
+ * Sends market orders to match limit orders and create price volatility
+ */
+export class MarketOrderBotStrategy extends BaseStrategy {
   private lastOrderTime: number = 0;
+  private averagePrice: number = 0;
 
-  constructor(symbol: string, spreadPercent: number = 0.0005) {
+  constructor(symbol: string) {
     super(symbol);
-    // Reduced spread to follow Binance prices more closely
-    this.spreadPercent = spreadPercent;
   }
 
   onPriceUpdate(ticker: TickerData): void {
@@ -18,37 +21,37 @@ export class MarketMakerStrategy extends BaseStrategy {
     }
   }
 
+  /**
+   * Set the average price from Binance reference
+   */
+  setAveragePrice(price: number): void {
+    this.averagePrice = price;
+    this.lastPrice = price;
+  }
+
   getAction(): Action | null {
-    if (this.lastPrice === 0) return null;
+    if (this.averagePrice === 0) return null;
 
     const now = Date.now();
-    const interval = this.getInterval() * 1000;
+    const interval = this.getInterval(); // 500-2000ms
 
     // Prevent too frequent orders
     if (now - this.lastOrderTime < interval) {
       return null;
     }
 
-    const basePrice = this.lastPrice;
-
-    // Random side like real users
+    // Random side - market orders can be either buy or sell
     const side = Math.random() > 0.5 ? OrderSide.BUY : OrderSide.SELL;
 
-    // Apply spread to create price differences that increase match probability
-    let price: number;
-    if (side === OrderSide.BUY) {
-      // Buy below market price (bid)
-      price = basePrice * (1 - this.spreadPercent);
-    } else {
-      // Sell above market price (ask)
-      price = basePrice * (1 + this.spreadPercent);
-    }
+    // For market orders, price is not used (will be matched at best available price)
+    // But we still need to provide a price for the Action interface
+    // The matching engine will ignore this price for MARKET orders
+    const price = this.averagePrice;
 
     // Dynamic amount based on market minOrderSize
     let minAmount = 0.001;
     let maxAmount = 0.01;
 
-    // Use market-specific amounts if available
     if (this.marketInfo) {
       // Use 10x to 100x minOrderSize for reasonable order sizes
       minAmount = Number(this.marketInfo.minOrderSize) * 10;
@@ -65,13 +68,13 @@ export class MarketMakerStrategy extends BaseStrategy {
 
     return {
       side,
-      price: this.roundPrice(price),
+      price: this.roundPrice(price), // Not used for market orders, but required by interface
       amount: this.roundAmount(amount),
     };
   }
 
   getInterval(): number {
-    // Market makers trade randomly between 30-120 seconds to simulate real user behavior
-    return Math.floor(Math.random() * 90) + 30;
+    // Random interval between 60-180 seconds (60000-180000ms) - much slower for market orders to reduce matching frequency
+    return Math.floor(Math.random() * 120000) + 60000;
   }
 }

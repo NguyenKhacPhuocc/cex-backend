@@ -4,11 +4,12 @@ import { BotService } from './bot.service';
 import { User } from '../users/entities/user.entity';
 import { Wallet } from '../wallets/entities/wallet.entity';
 import { Market } from '../market/entities/market.entity';
+import { Order } from '../order/entities/order.entity';
 import { OrderModule } from '../order/order.module';
 import { BinanceModule } from '../binance/binance.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([User, Wallet, Market]), OrderModule, BinanceModule],
+  imports: [TypeOrmModule.forFeature([User, Wallet, Market, Order]), OrderModule, BinanceModule],
   providers: [BotService],
   exports: [BotService],
 })

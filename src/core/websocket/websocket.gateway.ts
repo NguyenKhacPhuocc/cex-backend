@@ -235,7 +235,8 @@ export class TradingWebSocketGateway
 
     // Broadcast ticker update for this symbol (public event - no subscription needed)
     this.broadcastTickerUpdate(symbol).catch((error) => {
-      this.logger.error(`Error broadcasting ticker update for ${symbol}:`, error);
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Error broadcasting ticker update for ${symbol}: ${errorMsg}`);
     });
   }
 
@@ -286,12 +287,13 @@ export class TradingWebSocketGateway
     }
     this.orderbookSubscriptions.get(symbol)!.add(client.id);
 
-    // Send initial snapshot
+    // Send initial snapshot - tăng depth lên 500 để lấy nhiều orders hơn
     try {
-      const snapshot = await this.orderBookService.getOrderBookSnapshot(symbol, 100);
+      const snapshot = await this.orderBookService.getOrderBookSnapshot(symbol, 500);
       client.emit('orderbook:snapshot', snapshot);
     } catch (error) {
-      this.logger.error(`Error fetching orderbook snapshot for ${symbol}:`, error);
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Error fetching orderbook snapshot for ${symbol}: ${errorMsg}`);
       client.emit('orderbook:error', {
         message: 'Failed to fetch orderbook',
       });
@@ -323,15 +325,16 @@ export class TradingWebSocketGateway
     }
 
     try {
-      // Use same depth as initial snapshot (200) to ensure consistency
-      const snapshot = await this.orderBookService.getOrderBookSnapshot(symbol, 100);
+      // Use same depth as initial snapshot (500) to ensure consistency
+      const snapshot = await this.orderBookService.getOrderBookSnapshot(symbol, 500);
 
       // Emit to all subscribers
       subscribers.forEach((socketId) => {
         this.server.to(socketId).emit('orderbook:update', snapshot);
       });
     } catch (error) {
-      this.logger.error(`Error broadcasting orderbook update for ${symbol}:`, error);
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Error broadcasting orderbook update for ${symbol}: ${errorMsg}`);
     }
   }
 
@@ -348,7 +351,8 @@ export class TradingWebSocketGateway
       // Broadcast to all subscribers and all connected clients (public market data)
       this.server.emit('ticker:update', ticker);
     } catch (error) {
-      this.logger.error(`Error broadcasting ticker update for ${symbol}:`, error);
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Error broadcasting ticker update for ${symbol}: ${errorMsg}`);
     }
   }
 
@@ -382,7 +386,8 @@ export class TradingWebSocketGateway
         });
       }
     } catch (error) {
-      this.logger.error(`Error fetching ticker snapshot for ${symbol}:`, error);
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Error fetching ticker snapshot for ${symbol}: ${errorMsg}`);
       client.emit('ticker:error', {
         message: 'Failed to fetch ticker',
       });

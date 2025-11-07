@@ -180,10 +180,17 @@ export class OrderService implements OnModuleInit {
       order: { createdAt: 'DESC' },
     });
 
-    // Cache the result in Redis with a TTL (e.g., 5 minutes)
-    await this.redisService.set(redisKey, JSON.stringify(dbOrders), 300);
+    // Serialize Date fields to ISO string for proper JSON serialization
+    const serializedOrders = dbOrders.map((order) => ({
+      ...order,
+      createdAt: order.createdAt ? new Date(order.createdAt).toISOString() : null,
+      updatedAt: order.updatedAt ? new Date(order.updatedAt).toISOString() : null,
+    })) as any as Order[];
 
-    return dbOrders;
+    // Cache the result in Redis with a TTL (e.g., 5 minutes)
+    await this.redisService.set(redisKey, JSON.stringify(serializedOrders), 300);
+
+    return serializedOrders;
   }
 
   async getUserOrderHistory(user: User): Promise<Order[]> {
@@ -196,7 +203,12 @@ export class OrderService implements OnModuleInit {
       order: { createdAt: 'DESC' },
       take: 50, // Pagination to prevent loading too many records
     });
-    return orders;
+    // Serialize Date fields to ISO string for proper JSON serialization
+    return orders.map((order) => ({
+      ...order,
+      createdAt: order.createdAt ? new Date(order.createdAt).toISOString() : null,
+      updatedAt: order.updatedAt ? new Date(order.updatedAt).toISOString() : null,
+    })) as any as Order[];
   }
 
   async getOrderById(user: User, orderId: string): Promise<Order> {
@@ -210,7 +222,12 @@ export class OrderService implements OnModuleInit {
     if (!order) {
       throw new NotFoundException(`Order not found`);
     }
-    return order;
+    // Serialize Date fields to ISO string for proper JSON serialization
+    return {
+      ...order,
+      createdAt: order.createdAt ? new Date(order.createdAt).toISOString() : null,
+      updatedAt: order.updatedAt ? new Date(order.updatedAt).toISOString() : null,
+    } as any as Order;
   }
 
   async cancelOrder(user: User, orderId: string) {
@@ -228,15 +245,29 @@ export class OrderService implements OnModuleInit {
 
     // Transaction đảm bảo đồng bộ
     await this.dataSource.transaction(async (manager) => {
-      order.status = OrderStatus.CANCELED;
-      await manager.save(order);
+      // Reload order entity in transaction to ensure it's a proper entity instance
+      const orderEntity = await manager.findOne(Order, {
+        where: { id: orderId },
+        relations: ['market'],
+      });
 
-      const remainingAmount = order.amount - order.filled;
+      if (!orderEntity) {
+        throw new NotFoundException(`Order not found`);
+      }
+
+      orderEntity.status = OrderStatus.CANCELED;
+      await manager.save(orderEntity);
+
+      const remainingAmount = Number(orderEntity.amount) - Number(orderEntity.filled);
       const amountToUnlock =
-        order.side === OrderSide.BUY ? order.price * remainingAmount : remainingAmount;
+        orderEntity.side === OrderSide.BUY
+          ? Number(orderEntity.price) * remainingAmount
+          : remainingAmount;
 
       const currencyToUnlock =
-        order.side === OrderSide.BUY ? order.market.quoteAsset : order.market.baseAsset;
+        orderEntity.side === OrderSide.BUY
+          ? orderEntity.market.quoteAsset
+          : orderEntity.market.baseAsset;
 
       const wallet = await manager.findOne(Wallet, {
         where: {

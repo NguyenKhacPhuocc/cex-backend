@@ -16,6 +16,7 @@ export interface MarketInfo {
   minOrderSize: number;
   baseAsset: string;
   quoteAsset: string;
+  pricePrecision: number; // Số chữ số thập phân cho giá
 }
 
 export abstract class BaseStrategy {

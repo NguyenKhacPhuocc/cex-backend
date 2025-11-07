@@ -202,11 +202,13 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
       const cached = await this.redisService.get(`binance:price:${symbol}`);
       if (cached) {
         const price = parseFloat(cached);
-        this.logger.debug(`[REDIS_GET] 📖 Retrieved ${symbol} from Redis: ${price}`);
+        // Comment out debug log để tránh spam log (được gọi mỗi 5 giây cho mỗi market)
+        // this.logger.debug(`[REDIS_GET] 📖 Retrieved ${symbol} from Redis: ${price}`);
         return price;
       }
 
-      this.logger.warn(`[REDIS_GET] ⚠️ No price in Redis for ${symbol}`);
+      // Chỉ log warning khi thực sự không có giá (không log mỗi lần get)
+      // this.logger.warn(`[REDIS_GET] ⚠️ No price in Redis for ${symbol}`);
       return null;
     } catch (error) {
       const msg = (error as Error).message;
