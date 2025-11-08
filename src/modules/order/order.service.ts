@@ -27,6 +27,7 @@ import { RedisService } from 'src/core/redis/redis.service';
 import { REDIS_KEYS } from 'src/common/constants/redis-keys';
 import { TradingWebSocketGateway } from 'src/core/websocket/websocket.gateway';
 import { WalletCalculationService } from 'src/common/services/wallet-calculation.service';
+import { Trade } from '../trades/entities/trade.entity';
 
 @Injectable()
 export class OrderService implements OnModuleInit {
@@ -43,6 +44,8 @@ export class OrderService implements OnModuleInit {
     private orderRepo: Repository<Order>,
     @InjectRepository(Wallet)
     private walletRepo: Repository<Wallet>,
+    @InjectRepository(Trade)
+    private tradeRepo: Repository<Trade>,
     @Inject(forwardRef(() => TradingWebSocketGateway))
     private readonly wsGateway: TradingWebSocketGateway,
     private readonly walletCalculationService: WalletCalculationService,
@@ -61,107 +64,158 @@ export class OrderService implements OnModuleInit {
 
   async createOrder(user: User, createOrderDto: CreateOrderDto): Promise<Order> {
     const { side, type, price, amount, marketSymbol } = createOrderDto;
+    const maxRetries = 3;
+    let retryCount = 0;
+    let wallet: Wallet | null = null;
+    let amountToLock: number = 0;
 
-    // Validate price is required for LIMIT orders
-    if (type === OrderType.LIMIT && (!price || price <= 0)) {
-      throw new BadRequestException(
-        'Price is required and must be greater than 0 for LIMIT orders',
-      );
-    }
+    while (retryCount < maxRetries) {
+      try {
+        // Validate price is required for LIMIT orders
+        if (type === OrderType.LIMIT && (!price || price <= 0)) {
+          throw new BadRequestException(
+            'Price is required and must be greater than 0 for LIMIT orders',
+          );
+        }
 
-    // Validate amount
-    if (!amount || amount <= 0) {
-      throw new BadRequestException('Amount must be greater than 0');
-    }
+        // Validate amount
+        if (!amount || amount <= 0) {
+          throw new BadRequestException('Amount must be greater than 0');
+        }
 
-    const market = await this.marketService.findBySymbol(marketSymbol);
-    if (!market) {
-      throw new NotFoundException(`Market ${marketSymbol} not found`);
-    }
+        const market = await this.marketService.findBySymbol(marketSymbol);
+        if (!market) {
+          throw new NotFoundException(`Market ${marketSymbol} not found`);
+        }
 
-    // Balance check and locking
-    const walletToLock = WalletType.SPOT;
-    const currencyToLock = side === OrderSide.BUY ? market.quoteAsset : market.baseAsset;
+        // Balance check and locking
+        const walletToLock = WalletType.SPOT;
+        const currencyToLock = side === OrderSide.BUY ? market.quoteAsset : market.baseAsset;
 
-    // Get wallet first to check balance
-    const wallet = await this.walletRepo.findOne({
-      where: {
-        user: { id: user.id },
-        currency: currencyToLock,
-        walletType: walletToLock,
-      },
-    });
+        // Get wallet first to check balance (reload on retry to get latest balance)
+        wallet = await this.walletRepo.findOne({
+          where: {
+            user: { id: user.id },
+            currency: currencyToLock,
+            walletType: walletToLock,
+          },
+        });
 
-    if (!wallet) {
-      throw new BadRequestException('Wallet not found');
-    }
+        if (!wallet) {
+          throw new BadRequestException('Wallet not found');
+        }
 
-    // Calculate amount to lock
-    let amountToLock: number;
-    if (type === OrderType.MARKET && side === OrderSide.BUY) {
-      // Market BUY order: Lock entire available balance (since we don't know exact price)
-      // This ensures we have enough to cover the trade at any price
-      amountToLock = side === OrderSide.BUY ? (price as number) * amount : amount;
+        // Calculate amount to lock
+        if (type === OrderType.MARKET && side === OrderSide.BUY) {
+          // Market BUY order: Lock entire available balance (since we don't know exact price)
+          // This ensures we have enough to cover the trade at any price
+          if (!wallet || wallet.available <= 0) {
+            throw new BadRequestException('Insufficient balance');
+          }
+          // Lock entire available balance for market BUY orders
+          amountToLock = wallet.available;
+        } else if (type === OrderType.MARKET && side === OrderSide.SELL) {
+          // Market SELL order: Lock the base asset amount
+          amountToLock = amount;
+        } else {
+          // LIMIT order: Use calculated amount with price
+          if (!price || price <= 0 || isNaN(price)) {
+            throw new BadRequestException('Price is required and must be valid for LIMIT orders');
+          }
+          amountToLock = side === OrderSide.BUY ? price * amount : amount;
+        }
 
-      if (amountToLock <= 0) {
-        throw new BadRequestException('Insufficient balance');
+        // Validate amountToLock
+        if (!amountToLock || isNaN(amountToLock) || amountToLock <= 0) {
+          throw new BadRequestException(`Invalid amount to lock: ${amountToLock}`);
+        }
+
+        if (!wallet || wallet.available < amountToLock) {
+          throw new BadRequestException('Insufficient balance');
+        }
+
+        // Use WalletCalculationService for balance locking
+        this.walletCalculationService.lockBalance(wallet, amountToLock);
+        await this.walletRepo.save(wallet);
+
+        const order = this.orderRepo.create({
+          user,
+          market,
+          side,
+          type,
+          price,
+          amount,
+          status: OrderStatus.OPEN,
+        });
+        const savedOrder = await this.orderRepo.save(order);
+
+        // Ensure market data is included when enqueuing
+        // TypeORM might not return the full market relation, so we explicitly include it
+        const orderWithMarket = {
+          ...savedOrder,
+          market: market,
+          user: { id: user.id },
+        };
+        await this.orderQueue.enqueue(market.symbol, orderWithMarket as any);
+
+        // Emit WebSocket event immediately after order creation
+        // This allows frontend to show order in "pending orders" table immediately
+        // without waiting for matching engine to process it
+        this.wsGateway.emitOrderUpdate(String(user.id), savedOrder.id, OrderStatus.OPEN);
+
+        // Publish message to invalidate cache for user's open orders
+        await this.redisPubSub.publish(REDIS_KEYS.ORDER_UPDATE_CHANNEL, {
+          userId: user.id,
+        });
+
+        return savedOrder;
+      } catch (error: unknown) {
+        // Check if it's a deadlock error (PostgreSQL error code 40P01)
+        const errorObj = error as {
+          code?: string;
+          driverError?: { code?: string };
+          message?: string;
+        };
+        const isDeadlock =
+          errorObj?.code === '40P01' ||
+          errorObj?.driverError?.code === '40P01' ||
+          (typeof errorObj?.message === 'string' && errorObj.message.includes('deadlock'));
+
+        if (isDeadlock && retryCount < maxRetries - 1) {
+          retryCount++;
+          // Wait random time between 50-200ms before retry (exponential backoff)
+          const delay = Math.random() * 150 + 50;
+          await new Promise((resolve) => setTimeout(resolve, delay * retryCount));
+          this.logger.warn(
+            `Deadlock detected for order creation (user: ${user.id}, market: ${marketSymbol}), retrying... (${retryCount}/${maxRetries})`,
+          );
+          // Revert balance lock if it was set before retry
+          if (wallet && amountToLock > 0) {
+            try {
+              this.walletCalculationService.unlockBalance(wallet, amountToLock);
+              await this.walletRepo.save(wallet);
+            } catch {
+              // Ignore unlock errors during retry
+            }
+          }
+          continue;
+        }
+
+        // Revert balance lock if order creation fails (not a retryable deadlock)
+        if (wallet && amountToLock > 0) {
+          try {
+            this.walletCalculationService.unlockBalance(wallet, amountToLock);
+            await this.walletRepo.save(wallet);
+          } catch (unlockError) {
+            this.logger.error(`Failed to unlock balance after order creation error:`, unlockError);
+          }
+        }
+        throw error;
       }
-    } else {
-      // LIMIT order or MARKET SELL: Use calculated amount
-      amountToLock = side === OrderSide.BUY ? (price as number) * amount : amount;
-
-      if (!amountToLock || isNaN(amountToLock) || amountToLock <= 0) {
-        throw new BadRequestException('Invalid amount to lock');
-      }
     }
 
-    if (!wallet || wallet.available < amountToLock) {
-      throw new BadRequestException('Insufficient balance');
-    }
-
-    // Use WalletCalculationService for balance locking
-    this.walletCalculationService.lockBalance(wallet, amountToLock);
-    await this.walletRepo.save(wallet);
-
-    try {
-      const order = this.orderRepo.create({
-        user,
-        market,
-        side,
-        type,
-        price,
-        amount,
-        status: OrderStatus.OPEN,
-      });
-      const savedOrder = await this.orderRepo.save(order);
-
-      // Ensure market data is included when enqueuing
-      // TypeORM might not return the full market relation, so we explicitly include it
-      const orderWithMarket = {
-        ...savedOrder,
-        market: market,
-        user: { id: user.id },
-      };
-      await this.orderQueue.enqueue(market.symbol, orderWithMarket as any);
-
-      // Emit WebSocket event immediately after order creation
-      // This allows frontend to show order in "pending orders" table immediately
-      // without waiting for matching engine to process it
-      this.wsGateway.emitOrderUpdate(String(user.id), savedOrder.id, OrderStatus.OPEN);
-
-      // Publish message to invalidate cache for user's open orders
-      await this.redisPubSub.publish(REDIS_KEYS.ORDER_UPDATE_CHANNEL, {
-        userId: user.id,
-      });
-
-      return savedOrder;
-    } catch (error) {
-      // Revert balance lock if order enqueuing fails
-      wallet.available = Number(wallet.available) + amountToLock;
-      wallet.frozen = Number(wallet.frozen) - amountToLock;
-      await this.walletRepo.save(wallet);
-      throw error;
-    }
+    // This should never be reached, but TypeScript requires it
+    throw new Error('Order creation failed after max retries');
   }
 
   async getUserOrdersIsOpen(user: User): Promise<Order[]> {
@@ -259,11 +313,8 @@ export class OrderService implements OnModuleInit {
       await manager.save(orderEntity);
 
       const remainingAmount = Number(orderEntity.amount) - Number(orderEntity.filled);
-      const amountToUnlock =
-        orderEntity.side === OrderSide.BUY
-          ? Number(orderEntity.price) * remainingAmount
-          : remainingAmount;
 
+      // Determine currency to unlock
       const currencyToUnlock =
         orderEntity.side === OrderSide.BUY
           ? orderEntity.market.quoteAsset
@@ -277,10 +328,135 @@ export class OrderService implements OnModuleInit {
         },
       });
 
-      if (wallet) {
-        wallet.available = Number(wallet.available) + amountToUnlock;
-        wallet.frozen = Number(wallet.frozen) - amountToUnlock;
-        await manager.save(wallet);
+      if (!wallet) {
+        this.logger.warn(`Wallet not found for order ${orderEntity.id}, skipping unlock`);
+      } else {
+        let amountToUnlock: number;
+
+        if (orderEntity.type === OrderType.MARKET) {
+          // For market orders: Calculate exact frozen balance for THIS order only
+          // We need to exclude frozen balance from other open orders
+
+          // Get all other open orders for the same user and currency
+          const otherOpenOrders = await manager.find(Order, {
+            where: {
+              user: { id: user.id },
+              market: { id: orderEntity.market.id },
+              status: In([OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED]),
+              id: Not(orderEntity.id), // Exclude current order
+            },
+            relations: ['market'],
+          });
+
+          // Calculate total frozen balance locked by other orders
+          let totalFrozenFromOtherOrders = 0;
+          for (const otherOrder of otherOpenOrders) {
+            if (otherOrder.side === OrderSide.BUY) {
+              // BUY orders lock quoteAsset
+              if (otherOrder.market.quoteAsset === currencyToUnlock) {
+                if (otherOrder.type === OrderType.MARKET) {
+                  // Market BUY: Cannot calculate exactly, but we'll handle it
+                  // For now, skip calculation for market orders
+                } else {
+                  // LIMIT BUY: price * remainingAmount
+                  const otherRemaining = Number(otherOrder.amount) - Number(otherOrder.filled);
+                  if (otherOrder.price && otherRemaining > 0) {
+                    totalFrozenFromOtherOrders += Number(otherOrder.price) * otherRemaining;
+                  }
+                }
+              }
+            } else {
+              // SELL orders lock baseAsset
+              if (otherOrder.market.baseAsset === currencyToUnlock) {
+                const otherRemaining = Number(otherOrder.amount) - Number(otherOrder.filled);
+                totalFrozenFromOtherOrders += otherRemaining;
+              }
+            }
+          }
+
+          // Calculate frozen balance for THIS order
+          const currentFrozenBalance = Number(wallet.frozen);
+
+          if (orderEntity.side === OrderSide.BUY) {
+            // Market BUY: Calculate frozen balance from trades
+            // Total tradeValue used = sum(trade.price * trade.amount) for this order
+            const trades = await manager.find(Trade, {
+              where: { buyOrder: { id: orderEntity.id } },
+            });
+
+            let totalTradeValueUsed = 0;
+            for (const trade of trades) {
+              totalTradeValueUsed += Number(trade.price) * Number(trade.amount);
+            }
+
+            // Frozen balance for THIS order = current frozen - other orders' frozen
+            // But we also know: original frozen = current frozen + totalTradeValueUsed
+            // So: frozen for this order = current frozen - other orders' frozen
+            if (currentFrozenBalance > totalFrozenFromOtherOrders) {
+              amountToUnlock = currentFrozenBalance - totalFrozenFromOtherOrders;
+            } else {
+              // If calculation shows no frozen left, but we know trades were made,
+              // it means all frozen was used. But we should still unlock any remaining.
+              // This shouldn't happen normally, but handle gracefully
+              this.logger.warn(
+                `Market BUY order ${orderEntity.id}: frozen balance calculation issue. Current: ${currentFrozenBalance}, Other orders: ${totalFrozenFromOtherOrders}, TradeValue used: ${totalTradeValueUsed}`,
+              );
+              // Unlock whatever is left (should be 0 or very small)
+              amountToUnlock = Math.max(0, currentFrozenBalance - totalFrozenFromOtherOrders);
+            }
+          } else {
+            // Market SELL: remainingAmount is exact (baseAsset)
+            // But need to exclude other orders' frozen
+            if (currentFrozenBalance > totalFrozenFromOtherOrders) {
+              amountToUnlock = Math.min(
+                currentFrozenBalance - totalFrozenFromOtherOrders,
+                remainingAmount,
+              );
+            } else {
+              amountToUnlock = remainingAmount;
+            }
+          }
+
+          // Safety check: amountToUnlock should not exceed current frozen balance
+          if (amountToUnlock > currentFrozenBalance) {
+            this.logger.warn(
+              `Calculated unlock amount ${amountToUnlock} exceeds frozen balance ${currentFrozenBalance} for order ${orderEntity.id}, using frozen balance`,
+            );
+            amountToUnlock = currentFrozenBalance;
+          }
+        } else {
+          // For LIMIT orders: Calculate unlock amount based on price
+          // Validate price for LIMIT BUY orders
+          if (
+            orderEntity.side === OrderSide.BUY &&
+            (!orderEntity.price ||
+              isNaN(Number(orderEntity.price)) ||
+              Number(orderEntity.price) <= 0)
+          ) {
+            this.logger.error(
+              `Cannot cancel LIMIT BUY order ${orderEntity.id}: invalid price ${orderEntity.price}`,
+            );
+            throw new BadRequestException('Invalid order price');
+          }
+
+          amountToUnlock =
+            orderEntity.side === OrderSide.BUY
+              ? Number(orderEntity.price) * remainingAmount
+              : remainingAmount;
+        }
+
+        // Unlock balance if amount is valid
+        if (amountToUnlock > 0 && !isNaN(amountToUnlock)) {
+          this.walletCalculationService.unlockBalance(wallet, amountToUnlock);
+          await manager.save(wallet);
+          this.logger.log(
+            `Unlocked ${amountToUnlock} ${currencyToUnlock} for canceled ${orderEntity.type} ${orderEntity.side} order ${orderEntity.id}`,
+          );
+        } else {
+          this.logger.warn(
+            `Invalid amountToUnlock for order ${orderEntity.id}: ${amountToUnlock}, skipping wallet update`,
+          );
+        }
       }
     });
 
@@ -328,11 +504,27 @@ export class OrderService implements OnModuleInit {
         );
         order.status = OrderStatus.CANCELED;
 
-        const remainingAmount = order.amount - order.filled;
-        if (remainingAmount <= 0) continue;
+        const remainingAmount = Number(order.amount) - Number(order.filled);
+        if (remainingAmount <= 0 || isNaN(remainingAmount)) continue;
 
-        const amount =
-          order.side === OrderSide.BUY ? (order.price || 0) * remainingAmount : remainingAmount;
+        // Validate price for BUY orders
+        let amount = 0;
+        if (order.side === OrderSide.BUY) {
+          if (!order.price || isNaN(Number(order.price)) || Number(order.price) <= 0) {
+            this.logger.warn(`Skipping order ${order.id}: invalid price ${order.price}`);
+            continue;
+          }
+          amount = Number(order.price) * remainingAmount;
+        } else {
+          amount = remainingAmount;
+        }
+
+        // Validate amount
+        if (isNaN(amount) || amount <= 0) {
+          this.logger.warn(`Skipping order ${order.id}: invalid amount ${amount}`);
+          continue;
+        }
+
         const currency =
           order.side === OrderSide.BUY ? order.market.quoteAsset : order.market.baseAsset;
 
@@ -340,7 +532,7 @@ export class OrderService implements OnModuleInit {
       }
 
       for (const [currency, amount] of amountsToUnlock.entries()) {
-        if (amount <= 0) continue;
+        if (amount <= 0 || isNaN(amount)) continue;
         const wallet = await manager.findOne(Wallet, {
           where: {
             user: { id: user.id },
@@ -350,8 +542,7 @@ export class OrderService implements OnModuleInit {
         });
 
         if (wallet) {
-          wallet.available = Number(wallet.available) + amount;
-          wallet.frozen = Number(wallet.frozen) - amount;
+          this.walletCalculationService.unlockBalance(wallet, amount);
           await manager.save(wallet);
         }
       }
@@ -394,11 +585,27 @@ export class OrderService implements OnModuleInit {
         );
         order.status = OrderStatus.CANCELED;
 
-        const remainingAmount = order.amount - order.filled;
-        if (remainingAmount <= 0) continue;
+        const remainingAmount = Number(order.amount) - Number(order.filled);
+        if (remainingAmount <= 0 || isNaN(remainingAmount)) continue;
 
-        const amount =
-          order.side === OrderSide.BUY ? (order.price || 0) * remainingAmount : remainingAmount;
+        // Validate price for BUY orders
+        let amount = 0;
+        if (order.side === OrderSide.BUY) {
+          if (!order.price || isNaN(Number(order.price)) || Number(order.price) <= 0) {
+            this.logger.warn(`Skipping order ${order.id}: invalid price ${order.price}`);
+            continue;
+          }
+          amount = Number(order.price) * remainingAmount;
+        } else {
+          amount = remainingAmount;
+        }
+
+        // Validate amount
+        if (isNaN(amount) || amount <= 0) {
+          this.logger.warn(`Skipping order ${order.id}: invalid amount ${amount}`);
+          continue;
+        }
+
         const currency =
           order.side === OrderSide.BUY ? order.market.quoteAsset : order.market.baseAsset;
 
@@ -406,7 +613,7 @@ export class OrderService implements OnModuleInit {
       }
 
       for (const [currency, amount] of amountsToUnlock.entries()) {
-        if (amount <= 0) continue;
+        if (amount <= 0 || isNaN(amount)) continue;
         const wallet = await manager.findOne(Wallet, {
           where: {
             user: { id: user.id },
@@ -416,8 +623,7 @@ export class OrderService implements OnModuleInit {
         });
 
         if (wallet) {
-          wallet.available = Number(wallet.available) + amount;
-          wallet.frozen = Number(wallet.frozen) - amount;
+          this.walletCalculationService.unlockBalance(wallet, amount);
           await manager.save(wallet);
         }
       }

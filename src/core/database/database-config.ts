@@ -40,10 +40,12 @@ export const databaseConfig: TypeOrmModuleOptions = {
   ssl: getSSLConfig(),
   schema: 'public',
   // Connection pool settings for better performance
+  // Increased to handle high concurrency from bot service (30+ bots)
   extra: {
-    max: 20, // Maximum pool size
-    min: 2, // Minimum pool size
+    max: 50, // Maximum pool size (increased from 20 to handle more concurrent connections)
+    min: 5, // Minimum pool size (increased from 2 for better connection availability)
     idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 2000,
+    connectionTimeoutMillis: 10000, // Increased from 2000ms to 10000ms (10 seconds) to prevent timeout errors
+    statement_timeout: 30000, // 30 seconds timeout for long-running queries
   },
 };

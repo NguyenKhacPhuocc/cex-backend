@@ -1,6 +1,6 @@
 # Quick Usage Guide - Reset Database API
 
-## 🚀 Quick Start
+## Quick Start
 
 ### 1. Ensure you have an ADMIN user
 
@@ -167,7 +167,7 @@ npm run test:e2e  # Clean state!
 
 ---
 
-## ⚠️ Important Notes
+## Important Notes
 
 1. **ADMIN Only**: Only users with `role = 'ADMIN'` can use this endpoint
 2. **Development Only**: Remove `DevModule` in production!

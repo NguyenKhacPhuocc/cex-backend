@@ -56,12 +56,12 @@ export class BotService implements OnModuleInit {
     this.logger.log(`[BOT_INIT] ENABLE_BOTS=${enableBots}`);
 
     if (enableBots === 'true') {
-      this.logger.log('[BOT_INIT] ✅ Bots enabled, starting initialization...');
+      this.logger.log('[BOT_INIT]  Bots enabled, starting initialization...');
       await this.initializeBots();
       this.startTradingLoop();
-      this.logger.log('[BOT_INIT] ✅ Bot initialization complete');
+      this.logger.log('[BOT_INIT]  Bot initialization complete');
     } else {
-      this.logger.log('[BOT_INIT] ❌ Bots disabled, skipping initialization');
+      this.logger.log('[BOT_INIT]   Bots disabled, skipping initialization');
     }
   }
 
@@ -79,7 +79,7 @@ export class BotService implements OnModuleInit {
       );
 
       if (markets.length === 0) {
-        this.logger.warn('[BOT_INIT] ⚠️ WARNING: No active markets found! Bots will not trade.');
+        this.logger.warn('[BOT_INIT] WARNING: No active markets found! Bots will not trade.');
         return;
       }
 
@@ -95,9 +95,9 @@ export class BotService implements OnModuleInit {
             role: UserRole.USER,
           });
           bot = await this.userRepo.save(bot);
-          this.logger.log(`[BOT_INIT] ✅ Created bot user: ${email} (ID: ${bot.id})`);
+          this.logger.log(`[BOT_INIT] Created bot user: ${email} (ID: ${bot.id})`);
         } else {
-          this.logger.log(`[BOT_INIT] ⏭️ Bot user already exists: ${email} (ID: ${bot.id})`);
+          this.logger.log(`[BOT_INIT] Bot user already exists: ${email} (ID: ${bot.id})`);
         }
 
         this.bots.push(bot);
@@ -111,7 +111,7 @@ export class BotService implements OnModuleInit {
       const marketBotCount = this.TOTAL_BOTS - limitBotCount;
 
       this.logger.log(
-        `[BOT_INIT] Bot distribution: ${limitBotCount} limit bots (70%), ${marketBotCount} market bots (30%)`,
+        `Bot distribution: ${limitBotCount} limit bots (70%), ${marketBotCount} market bots (30%)`,
       );
 
       for (let botIndex = 0; botIndex < this.bots.length; botIndex++) {
@@ -144,18 +144,10 @@ export class BotService implements OnModuleInit {
             isLimitBot,
             lastOrderTime: 0, // Track when order was placed
           });
-
-          this.logger.debug(
-            `[BOT_STRATEGY] Assigned ${isLimitBot ? 'LimitOrder' : 'MarketOrder'} strategy to bot${botIndex + 1} for ${market.symbol}`,
-          );
         }
       }
-
-      this.logger.log(
-        `[BOT_INIT] ✅ Initialized ${this.bots.length} bots with ${this.botConfigs.size} strategy instances`,
-      );
     } catch (error) {
-      this.logger.error(`[BOT_INIT] ❌ Failed to initialize bots:`, error);
+      this.logger.error(`Failed to initialize bots:`, error);
     }
   }
 
@@ -273,9 +265,7 @@ export class BotService implements OnModuleInit {
 
   private startTradingLoop(): void {
     if (this.isRunning) return;
-
     this.isRunning = true;
-    this.logger.log(`[BOT_LOOP] 🚀 Starting trading loop with ${this.bots.length} bots...`);
 
     // Main trading loop - run every 5 seconds for more realistic trading pace
     setInterval(() => {
@@ -289,17 +279,15 @@ export class BotService implements OnModuleInit {
 
     // Poll Binance prices periodically to update average prices
     this.listenToBinancePrices();
-    this.logger.log('[BOT_LOOP] ✅ Trading loop started');
   }
 
   private listenToBinancePrices(): void {
-    this.logger.log('[BOT_PRICE] 📡 Starting Binance price listener...');
     void this.updateBinancePrices();
 
     // Poll every 5 seconds to match Binance polling interval (tránh gọi quá nhiều)
     setInterval(() => {
       void this.updateBinancePrices();
-    }, 5000);
+    }, 3000);
   }
 
   private async updateBinancePrices(): Promise<void> {
@@ -308,46 +296,31 @@ export class BotService implements OnModuleInit {
     });
 
     for (const market of markets) {
-      let binancePrice = await this.binanceService.getLastPrice(market.symbol);
+      const binancePrice = await this.binanceService.getLastPrice(market.symbol);
 
-      // Fallback: Use random price if Binance unavailable
-      if (!binancePrice) {
-        binancePrice = this.generateFallbackPrice(market.symbol);
-        this.logger.debug(`[BOT_PRICE] Fallback: ${market.symbol} = ${binancePrice}`);
+      // Skip if price is not available (null) - will use last known price from averagePrices
+      if (binancePrice === null || binancePrice <= 0 || isNaN(binancePrice)) {
+        // Use existing average price if available, otherwise skip this update
+        const existingPrice = this.averagePrices.get(market.symbol);
+        if (existingPrice && existingPrice > 0) {
+          this.logger.debug(
+            `[BOT_PRICE] No new price for ${market.symbol}, keeping existing: ${existingPrice}`,
+          );
+          continue; // Keep using existing price, don't update
+        } else {
+          this.logger.warn(
+            `[BOT_PRICE] No price available for ${market.symbol} and no existing price to fallback`,
+          );
+          continue; // Skip this market
+        }
       }
 
       // Update average price for this symbol
-      const oldAveragePrice = this.averagePrices.get(market.symbol) || 0;
       this.averagePrices.set(market.symbol, binancePrice);
 
       // Update all strategies with new price
       this.updateStrategies(market.symbol, binancePrice);
-
-      // Check if limit bots need to cancel and replace orders (price changed >1%)
-      if (oldAveragePrice > 0) {
-        const priceChangePercent = Math.abs((binancePrice - oldAveragePrice) / oldAveragePrice);
-        if (priceChangePercent > 0.01) {
-          // Price changed > 1%, cancel and replace limit orders
-          this.logger.log(
-            `[BOT_PRICE] Price change >1% for ${market.symbol}: ${oldAveragePrice} -> ${binancePrice} (${(priceChangePercent * 100).toFixed(2)}%)`,
-          );
-          void this.cancelAndReplaceLimitOrders(market.symbol);
-        }
-      }
     }
-  }
-
-  private generateFallbackPrice(symbol: string): number {
-    const basePrice: Record<string, number> = {
-      BTC_USDT: 106900,
-      ETH_USDT: 3633,
-      SOL_USDT: 167.45,
-    };
-
-    const price = basePrice[symbol] || 100;
-    const variation = 0.005 + Math.random() * 0.01;
-    const direction = Math.random() > 0.5 ? 1 : -1;
-    return price * (1 + direction * variation);
   }
 
   private updateStrategies(symbol: string, price: number): void {
@@ -371,181 +344,141 @@ export class BotService implements OnModuleInit {
     }
   }
 
-  /**
-   * Cancel and replace limit orders when price changes >1%
-   * Hủy lệnh từng cái một với delay, nhưng không block execution loop
-   */
-  private cancelAndReplaceLimitOrders(symbol: string): void {
-    // Fire-and-forget: không block execution loop
-    void (async () => {
-      try {
-        // Find all limit bots for this symbol
-        for (const [, config] of this.botConfigs) {
-          if (config.symbol === symbol && config.isLimitBot) {
-            const bot = this.bots.find((b) => b.id.toString() === config.botId);
-            if (!bot) continue;
-
-            // Get open limit orders for this bot and symbol
-            const openOrders = await this.orderRepo.find({
-              where: {
-                user: { id: bot.id },
-                market: { symbol },
-                status: OrderStatus.OPEN,
-                type: OrderType.LIMIT,
-              },
-              relations: ['market'],
-            });
-
-            // Cancel orders từng cái một với delay để tạo cảm giác realtime
-            // Chỉ hủy các lệnh có status OPEN (tránh hủy lệnh đã bị hủy)
-            const ordersToCancel = openOrders.filter((o) => o.status === OrderStatus.OPEN);
-
-            // Hủy từng lệnh với delay riêng, không block nhau
-            for (let i = 0; i < ordersToCancel.length; i++) {
-              const order = ordersToCancel[i];
-              // Delay tăng dần: lệnh đầu tiên delay 0.5s, lệnh thứ 2 delay 1.5s, ...
-              const delay = i * 1000 + 500 + Math.random() * 1000; // 0.5-1.5s, 1.5-2.5s, 2.5-3.5s...
-
-              setTimeout(() => {
-                void (async () => {
-                  try {
-                    await this.orderService.cancelOrder(bot, order.id);
-                    this.logger.log(
-                      `[BOT_CANCEL] Cancelled limit order ${order.id} for bot ${bot.email} on ${symbol}`,
-                    );
-                  } catch (error) {
-                    // Bỏ qua lỗi nếu order đã bị hủy hoặc không còn OPEN
-                    if (error instanceof Error && error.message.includes('status')) {
-                      this.logger.debug(
-                        `[BOT_CANCEL] Order ${order.id} already cancelled or not OPEN, skipping`,
-                      );
-                    } else {
-                      this.logger.error(`[BOT_CANCEL] Failed to cancel order ${order.id}:`, error);
-                    }
-                  }
-                })();
-              }, delay);
-            }
-
-            // Bot có thể đặt lệnh mới ngay lập tức, không cần đợi hủy xong
-          }
-        }
-      } catch (error) {
-        this.logger.error(`[BOT_CANCEL] Failed to cancel and replace limit orders:`, error);
-      }
-    })();
-  }
-
   private async executeBotStrategies(): Promise<void> {
     const now = Date.now();
     let executedCount = 0;
 
-    for (const [, config] of this.botConfigs) {
-      const interval = config.strategy.getInterval(); // 5-15s for limit, 10-30s for market
-      if (now - config.lastAction < interval) continue;
+    // Process bots in batches to reduce concurrent DB operations and prevent connection pool exhaustion
+    const botConfigsArray = Array.from(this.botConfigs.entries());
+    const BATCH_SIZE = 5; // Process 5 bots at a time to limit concurrent DB operations
 
-      const bot = this.bots.find((b) => b.id.toString() === config.botId);
-      if (!bot) continue;
+    for (let i = 0; i < botConfigsArray.length; i += BATCH_SIZE) {
+      const batch = botConfigsArray.slice(i, i + BATCH_SIZE);
 
-      try {
-        const action = config.strategy.getAction();
-        if (!action) continue;
+      // Process batch with Promise.allSettled to handle errors gracefully
+      const results = await Promise.allSettled(
+        batch.map(async ([, config]) => {
+          const interval = config.strategy.getInterval(); // 30-120 seconds for limit bots
+          if (now - config.lastAction < interval) {
+            return { skipped: true };
+          }
 
-        // For limit bots, allow multiple orders (2-5 orders) to fill orderbook
-        if (config.isLimitBot) {
-          const openOrders = await this.orderRepo.find({
-            where: {
-              user: { id: bot.id },
-              market: { symbol: config.symbol },
-              status: OrderStatus.OPEN,
-              type: OrderType.LIMIT,
-            },
-            relations: ['market'], // Load market relation for cancelOrder
-            order: { createdAt: 'ASC' }, // Sort by oldest first
-          });
+          const bot = this.bots.find((b) => b.id.toString() === config.botId);
+          if (!bot) {
+            return { skipped: true };
+          }
 
-          // Kiểm tra và hủy các lệnh có giá lệch quá xa so với giá hiện tại (>2%)
-          const currentAveragePrice = this.averagePrices.get(config.symbol) || 0;
-          if (currentAveragePrice > 0) {
-            for (const order of openOrders) {
-              const orderPrice = Number(order.price);
-              const priceDiffPercent = Math.abs(
-                (orderPrice - currentAveragePrice) / currentAveragePrice,
-              );
+          try {
+            const action = config.strategy.getAction();
+            if (!action) {
+              return { skipped: true };
+            }
 
-              // Nếu giá lệch >2%, hủy lệnh đó
-              if (priceDiffPercent > 0.02) {
-                void (async () => {
+            // For limit bots, manage order count (3-6 orders per bot)
+            if (config.isLimitBot) {
+              const openOrders = await this.orderRepo.find({
+                where: {
+                  user: { id: bot.id },
+                  market: { symbol: config.symbol },
+                  status: OrderStatus.OPEN,
+                  type: OrderType.LIMIT,
+                },
+                relations: ['market'],
+                order: { createdAt: 'ASC' }, // Sort by oldest first
+              });
+
+              // Allow 3-6 limit orders per bot to fill orderbook
+              const maxOrdersPerBot = Math.floor(Math.random() * 4) + 3; // 3-6 orders
+
+              if (openOrders.length >= maxOrdersPerBot) {
+                // Check if we need to cancel old orders
+                const orderAge = now - config.lastOrderTime;
+                const cancelInterval = Math.floor(Math.random() * 120000) + 60000; // 60-180 seconds
+
+                if (orderAge > cancelInterval && openOrders.length > 0) {
+                  // Cancel the oldest order first, then place new order
+                  const oldestOrder = openOrders[0];
                   try {
-                    await this.orderService.cancelOrder(bot, order.id);
-                    this.logger.log(
-                      `[BOT_CANCEL] Cancelled order ${order.id} with price ${orderPrice} (diff: ${(priceDiffPercent * 100).toFixed(2)}%) vs current ${currentAveragePrice} for bot ${bot.email} on ${config.symbol}`,
-                    );
+                    // Cancel with timeout to prevent hanging
+                    await Promise.race([
+                      this.orderService.cancelOrder(bot, oldestOrder.id),
+                      new Promise((_, reject) =>
+                        setTimeout(() => reject(new Error('Cancel timeout')), 5000),
+                      ),
+                    ]);
+
+                    // Reset lastOrderTime AFTER successful cancel
+                    config.lastOrderTime = 0;
+
+                    // Small delay to ensure orderbook is updated
+                    await new Promise((resolve) => setTimeout(resolve, 100 + Math.random() * 200));
                   } catch (error) {
-                    this.logger.error(`[BOT_CANCEL] Failed to cancel order ${order.id}:`, error);
+                    // If cancel fails, log but continue (might be already cancelled or filled)
+                    if (error instanceof Error && error.message !== 'Cancel timeout') {
+                      this.logger.debug(
+                        `[BOT_CANCEL] Order ${oldestOrder.id} might be already cancelled/filled: ${error.message}`,
+                      );
+                    } else {
+                      this.logger.warn(
+                        `[BOT_CANCEL] Failed to cancel order ${oldestOrder.id}: ${error instanceof Error ? error.message : 'Unknown error'}`,
+                      );
+                    }
+                    return { skipped: true };
                   }
-                })();
+                } else {
+                  return { skipped: true };
+                }
               }
             }
-          }
 
-          // Cho phép mỗi bot có 3-6 lệnh limit cùng lúc để orderbook đầy hơn
-          // Tăng số lệnh thay vì tăng spread để giữ giá gần Binance
-          const maxOrdersPerBot = Math.floor(Math.random() * 4) + 3; // 3-6 orders
+            // Validate price for limit orders before placing
+            if (config.isLimitBot && action.price) {
+              const currentAveragePrice = this.averagePrices.get(config.symbol);
+              if (currentAveragePrice && currentAveragePrice > 0) {
+                const priceDiffPercent = Math.abs(
+                  (action.price - currentAveragePrice) / currentAveragePrice,
+                );
 
-          if (openOrders.length >= maxOrdersPerBot) {
-            // Đã đủ số lệnh, kiểm tra xem có cần hủy lệnh cũ không
-            const orderAge = now - config.lastOrderTime;
-            const cancelInterval = Math.floor(Math.random() * 120000) + 60000; // 60-180 seconds
-
-            if (orderAge > cancelInterval && openOrders.length > 0) {
-              // Chỉ hủy 1 lệnh cũ nhất, không phải tất cả
-              // Hủy lệnh không block việc đặt lệnh mới (fire-and-forget)
-              const oldestOrder = openOrders[0];
-              void (async () => {
-                try {
-                  // Delay ngẫu nhiên 0.5-2 giây trước khi hủy để tạo cảm giác realtime
-                  await new Promise((resolve) => setTimeout(resolve, 1000 + Math.random() * 1500));
-                  await this.orderService.cancelOrder(bot, oldestOrder.id);
-                  this.logger.log(
-                    `[BOT_CANCEL] Cancelled 1 old limit order ${oldestOrder.id} for bot ${bot.email} on ${config.symbol} (age: ${Math.floor(orderAge / 1000)}s)`,
+                // Reject order if price deviation >2%
+                if (priceDiffPercent > 0.02) {
+                  this.logger.warn(
+                    `[BOT_ORDER] Rejected order for ${bot.email} on ${config.symbol}: price ${action.price} deviates ${(priceDiffPercent * 100).toFixed(2)}% from current ${currentAveragePrice}`,
                   );
-                  // Reset lastOrderTime sau khi hủy xong
-                  config.lastOrderTime = 0;
-                } catch (error) {
-                  this.logger.error(
-                    `[BOT_CANCEL] Failed to cancel order ${oldestOrder.id}:`,
-                    error,
-                  );
+                  return { skipped: true };
                 }
-              })();
-
-              // Tiếp tục đặt lệnh mới ngay, không đợi hủy xong
-              // Reset lastOrderTime để cho phép đặt lệnh mới
-              config.lastOrderTime = 0;
-            } else {
-              // Chưa đến lúc hủy hoặc chưa đủ lệnh, skip
-              continue;
+              }
             }
+
+            this.logger.log(
+              `[BOT_EXEC] Bot ${bot.email}: ${action.side} ${action.amount} @ ${action.price || 'MARKET'} (${config.isLimitBot ? 'LIMIT' : 'MARKET'}) on ${config.symbol}`,
+            );
+
+            await this.executeBotAction(bot, config.symbol, action, config.isLimitBot);
+
+            config.lastAction = now;
+            return { executed: true };
+          } catch (error) {
+            this.logger.error(`[BOT_EXEC] Failed to execute action for ${bot.email}:`, error);
+            return { error: true };
           }
-          // Nếu số lệnh < maxOrdersPerBot, tiếp tục đặt lệnh mới
+        }),
+      );
+
+      // Count executed actions
+      for (const result of results) {
+        if (result.status === 'fulfilled' && result.value?.executed) {
+          executedCount++;
         }
+      }
 
-        this.logger.log(
-          `[BOT_EXEC] Bot ${bot.email}: ${action.side} ${action.amount} @ ${action.price} (${config.isLimitBot ? 'LIMIT' : 'MARKET'}) on ${config.symbol}`,
-        );
-
-        await this.executeBotAction(bot, config.symbol, action, config.isLimitBot);
-
-        executedCount++;
-        config.lastAction = now;
-      } catch (error) {
-        this.logger.error(`[BOT_EXEC] ❌ Failed to execute action for ${bot.email}:`, error);
+      // Small delay between batches to reduce DB load and prevent connection pool exhaustion
+      if (i + BATCH_SIZE < botConfigsArray.length) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
       }
     }
 
     if (executedCount > 0) {
-      this.logger.debug(`[BOT_EXEC] ✅ Executed ${executedCount} bot actions`);
+      this.logger.debug(`[BOT_EXEC] Executed ${executedCount} bot actions`);
     }
   }
 
@@ -563,7 +496,7 @@ export class BotService implements OnModuleInit {
       });
 
       if (!market) {
-        this.logger.warn(`[BOT_ACTION] ⚠️ Market not found: ${symbol}`);
+        this.logger.warn(`[BOT_ACTION] Market not found: ${symbol}`);
         return;
       }
 
@@ -574,10 +507,6 @@ export class BotService implements OnModuleInit {
         price: isLimitBot ? action.price : undefined, // Market orders don't need price
         amount: action.amount,
       };
-
-      this.logger.log(
-        `[BOT_ORDER] 📝 Creating ${isLimitBot ? 'LIMIT' : 'MARKET'} order for ${bot.email}: ${JSON.stringify(createOrderDto)}`,
-      );
 
       const order = await this.orderService.createOrder(bot, createOrderDto);
 
@@ -596,9 +525,9 @@ export class BotService implements OnModuleInit {
         }
       }
 
-      this.logger.log(`[BOT_ORDER] ✅ Order created successfully for ${bot.email}: ${order.id}`);
+      this.logger.log(`[BOT_ORDER] Order created successfully for ${bot.email}: ${order.id}`);
     } catch (error) {
-      this.logger.error(`[BOT_ORDER] ❌ Failed to create order:`, error);
+      this.logger.error(`[BOT_ORDER] Failed to create order:`, error);
     }
   }
 }

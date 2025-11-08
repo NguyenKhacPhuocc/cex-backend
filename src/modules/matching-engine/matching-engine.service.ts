@@ -7,7 +7,7 @@ import { Order } from 'src/modules/order/entities/order.entity';
 import { OrderSide, OrderStatus, OrderType } from 'src/shared/enums';
 import { OrderBookService } from '../trading/order-book.service';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { DataSource, In, Not, Repository } from 'typeorm';
 import { User } from 'src/modules/users/entities/user.entity';
 import { Market } from 'src/modules/market/entities/market.entity';
 import { Wallet, WalletType } from '../wallets/entities/wallet.entity';
@@ -34,6 +34,7 @@ export class MatchingEngineService implements OnModuleInit {
     private readonly wsGateway: TradingWebSocketGateway,
     private readonly candlesService: CandlesService,
     private readonly walletCalculationService: WalletCalculationService,
+    private readonly dataSource: DataSource,
     @InjectRepository(Order)
     private orderRepo: Repository<Order>,
     @InjectRepository(User)
@@ -149,19 +150,26 @@ export class MatchingEngineService implements OnModuleInit {
     // Update order status based on remaining amount
     if (remainingAmount <= 0) {
       order.status = OrderStatus.FILLED;
-    } else if (remainingAmount < order.amount) {
-      // For market orders, if not fully filled, cancel the remaining amount
-      if (order.type === OrderType.MARKET) {
-        order.status = OrderStatus.CANCELED;
+    } else if (order.type === OrderType.MARKET) {
+      // Market orders cannot remain OPEN - they must be filled or canceled
+      // If not fully filled (partially filled or not filled at all), cancel it
+      order.status = OrderStatus.CANCELED;
+      if (remainingAmount < order.amount) {
         this.logger.log(
           `Market order ${order.id} partially filled, canceling remaining ${remainingAmount} amount`,
         );
-        // Emit WebSocket event to notify user about cancellation
-        this.wsGateway.emitOrderUpdate(String(order.user.id), order.id, OrderStatus.CANCELED);
       } else {
-        order.status = OrderStatus.PARTIALLY_FILLED;
+        this.logger.log(
+          `Market order ${order.id} could not be filled, canceling entire order (remaining: ${remainingAmount})`,
+        );
       }
+      // Emit WebSocket event to notify user about cancellation
+      this.wsGateway.emitOrderUpdate(String(order.user.id), order.id, OrderStatus.CANCELED);
+    } else if (remainingAmount < order.amount) {
+      // LIMIT order: partially filled
+      order.status = OrderStatus.PARTIALLY_FILLED;
     } else {
+      // LIMIT order: not filled at all, remains OPEN
       order.status = OrderStatus.OPEN;
     }
     // order.amount = remainingAmount; // Update the order's remaining amount
@@ -183,17 +191,15 @@ export class MatchingEngineService implements OnModuleInit {
 
     await this.orderRepo.save(newOrderEntity);
 
-    // For market orders: Unlock remaining frozen balance that wasn't used
-    // Market orders lock balance, but may not use all of it if partially filled or canceled
-    if (
-      order.type === OrderType.MARKET &&
-      order.status !== OrderStatus.OPEN &&
-      remainingAmount > 0
-    ) {
+    // For market orders: Calculate exact frozen balance for THIS order only
+    // We need to exclude frozen balance from other open orders to prevent unlocking other orders' frozen balance
+    if (order.type === OrderType.MARKET && order.status !== OrderStatus.OPEN) {
       // For market BUY: unlock remaining quoteAsset (USDT)
       // For market SELL: unlock remaining baseAsset (BTC)
       const currencyToUnlock =
         order.side === OrderSide.BUY ? order.market.quoteAsset : order.market.baseAsset;
+
+      // Reload wallet to get latest frozen balance (after trades have subtracted from frozen)
       const wallet = await this.walletRepo.findOne({
         where: {
           user: { id: order.user.id },
@@ -202,30 +208,112 @@ export class MatchingEngineService implements OnModuleInit {
         },
       });
 
-      if (wallet && Number(wallet.frozen) > 0) {
-        // Calculate remaining amount to unlock
-        // For BUY: remainingAmount * estimatedPrice (or use order.price if set)
-        // For SELL: remainingAmount (baseAsset)
-        let amountToUnlock = 0;
-        if (order.side === OrderSide.BUY) {
-          // Estimate price from filled trades or use order.price
-          const estimatedPrice = order.price || 0;
-          amountToUnlock = Number(remainingAmount) * estimatedPrice;
-        } else {
-          // For SELL, remainingAmount is in baseAsset
-          amountToUnlock = Number(remainingAmount);
+      if (!wallet) {
+        this.logger.warn(`Wallet not found for market order ${order.id}, skipping unlock`);
+      } else {
+        // Get all other open orders for the same user and currency
+        const otherOpenOrders = await this.orderRepo.find({
+          where: {
+            user: { id: order.user.id },
+            market: { id: order.market.id },
+            status: In([OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED]),
+            id: Not(order.id), // Exclude current order
+          },
+          relations: ['market'],
+        });
+
+        // Calculate total frozen balance locked by other orders
+        let totalFrozenFromOtherOrders = 0;
+        for (const otherOrder of otherOpenOrders) {
+          if (otherOrder.side === OrderSide.BUY) {
+            // BUY orders lock quoteAsset
+            if (otherOrder.market.quoteAsset === currencyToUnlock) {
+              if (otherOrder.type === OrderType.LIMIT) {
+                // LIMIT BUY: price * remainingAmount
+                const otherRemaining = Number(otherOrder.amount) - Number(otherOrder.filled);
+                if (otherOrder.price && otherRemaining > 0) {
+                  totalFrozenFromOtherOrders += Number(otherOrder.price) * otherRemaining;
+                }
+              }
+              // Market BUY orders: Cannot calculate exactly, skip for now
+              // This means if there are multiple market BUY orders, calculation may be less accurate
+            }
+          } else {
+            // SELL orders lock baseAsset
+            if (otherOrder.market.baseAsset === currencyToUnlock) {
+              const otherRemaining = Number(otherOrder.amount) - Number(otherOrder.filled);
+              totalFrozenFromOtherOrders += otherRemaining;
+            }
+          }
         }
 
-        // Unlock the calculated amount (but don't exceed frozen balance)
-        const actualUnlock = Math.min(amountToUnlock, Number(wallet.frozen));
-        if (actualUnlock > 0) {
-          this.walletCalculationService.unlockBalance(wallet, actualUnlock);
+        const currentFrozenBalance = Number(wallet.frozen);
+        let frozenToUnlock = 0;
+
+        if (order.side === OrderSide.BUY) {
+          // Market BUY: Calculate frozen balance from trades
+          // Total tradeValue used = sum(trade.price * trade.amount) for this order
+          const trades = await this.tradeRepo.find({
+            where: { buyOrder: { id: order.id } },
+          });
+
+          let totalTradeValueUsed = 0;
+          for (const trade of trades) {
+            totalTradeValueUsed += Number(trade.price) * Number(trade.amount);
+          }
+
+          // Frozen balance for THIS order = current frozen - other orders' frozen
+          // This ensures we only unlock the frozen balance belonging to this order
+          if (currentFrozenBalance > totalFrozenFromOtherOrders) {
+            frozenToUnlock = currentFrozenBalance - totalFrozenFromOtherOrders;
+          } else {
+            // Edge case: calculation shows no frozen left or calculation issue
+            // This shouldn't happen normally, but handle gracefully
+            this.logger.warn(
+              `Market BUY order ${order.id}: frozen calculation issue. Current: ${currentFrozenBalance}, Other orders: ${totalFrozenFromOtherOrders}, TradeValue used: ${totalTradeValueUsed}`,
+            );
+            frozenToUnlock = Math.max(0, currentFrozenBalance - totalFrozenFromOtherOrders);
+          }
+        } else {
+          // Market SELL: remainingAmount is exact (baseAsset)
+          // But need to exclude other orders' frozen
+          if (currentFrozenBalance > totalFrozenFromOtherOrders) {
+            frozenToUnlock = Math.min(
+              currentFrozenBalance - totalFrozenFromOtherOrders,
+              remainingAmount,
+            );
+          } else {
+            // If current frozen is less than other orders' frozen, it means
+            // this order's frozen was already used, unlock remainingAmount as fallback
+            frozenToUnlock = remainingAmount;
+          }
+        }
+
+        // Safety check: frozenToUnlock should not exceed current frozen balance
+        if (frozenToUnlock > currentFrozenBalance) {
+          this.logger.warn(
+            `Calculated unlock amount ${frozenToUnlock} exceeds frozen balance ${currentFrozenBalance} for order ${order.id}, using frozen balance`,
+          );
+          frozenToUnlock = currentFrozenBalance;
+        }
+
+        // Unlock balance if amount is valid
+        if (frozenToUnlock > 0 && !isNaN(frozenToUnlock)) {
+          this.walletCalculationService.unlockBalance(wallet, frozenToUnlock);
           await this.walletRepo.save(wallet);
-          this.logger.debug(
-            `Unlocked remaining frozen balance for market ${order.side} order ${order.id}: ${actualUnlock} ${currencyToUnlock}`,
+          this.logger.log(
+            `Unlocked ${frozenToUnlock} ${currencyToUnlock} for market ${order.side} order ${order.id} (filled: ${order.filled}, remaining: ${remainingAmount}, other orders frozen: ${totalFrozenFromOtherOrders})`,
           );
           // Emit balance update to notify frontend about unlocked balance
           this.wsGateway.emitBalanceUpdate(String(order.user.id));
+        } else if (frozenToUnlock === 0 && currentFrozenBalance > 0) {
+          // Normal case: All frozen balance belongs to other orders, nothing to unlock for this order
+          this.logger.debug(
+            `Market order ${order.id}: All frozen balance (${currentFrozenBalance}) belongs to other orders (${totalFrozenFromOtherOrders}), nothing to unlock`,
+          );
+        } else if (currentFrozenBalance === 0) {
+          // Normal case: All frozen balance was used
+          this.logger.debug(`Market order ${order.id} used all frozen balance, nothing to unlock`);
         }
       }
     }
@@ -253,7 +341,7 @@ export class MatchingEngineService implements OnModuleInit {
     let iterations = 0;
     const skippedSelfMatches: Order[] = []; // Track self-match orders to add back later
 
-    while (remainingAmount > 0 && iterations < maxIterations) {
+    while (Number(remainingAmount) > 0 && iterations < maxIterations) {
       iterations++;
 
       // tìm kiếm order tốt nhất từ bên đối diện
@@ -290,6 +378,11 @@ export class MatchingEngineService implements OnModuleInit {
           : Number(order.price) <= Number(bestMatch.price);
 
       if (!canMatch) {
+        // Add back all skipped self-match orders before breaking
+        for (const skippedOrder of skippedSelfMatches) {
+          await this.orderBookService.add(skippedOrder);
+        }
+        skippedSelfMatches.length = 0;
         break; // Price does not match - no more matches possible
       }
 
@@ -367,7 +460,7 @@ export class MatchingEngineService implements OnModuleInit {
         );
       } catch (error) {
         this.logger.error(
-          `❌ Failed to add order ${order.id} (${order.side} ${order.market.symbol} @ ${order.price}) to orderbook:`,
+          `  Failed to add order ${order.id} (${order.side} ${order.market.symbol} @ ${order.price}) to orderbook:`,
           error,
         );
         // This is a critical error - an order that should be in the orderbook is not
@@ -469,6 +562,9 @@ export class MatchingEngineService implements OnModuleInit {
     ]);
 
     if (!fullTakerUser || !fullMakerUser || !fullTakerMarket || !fullMakerMarket) {
+      this.logger.error(
+        `Cannot execute trade: missing entities - takerUser: ${!!fullTakerUser}, makerUser: ${!!fullMakerUser}, takerMarket: ${!!fullTakerMarket}, makerMarket: ${!!fullMakerMarket}`,
+      );
       return;
     }
 
@@ -491,12 +587,26 @@ export class MatchingEngineService implements OnModuleInit {
       );
       return;
     }
-    const tradeValue = tradePrice * Number(matchedAmount);
+
+    // Validate matchedAmount before calculation
+    const normalizedMatchedAmount = Number(matchedAmount);
+    if (
+      !normalizedMatchedAmount ||
+      isNaN(normalizedMatchedAmount) ||
+      normalizedMatchedAmount <= 0
+    ) {
+      this.logger.error(
+        `Invalid matched amount: matchedAmount=${matchedAmount}, takerOrderId=${takerOrder.id}, makerOrderId=${makerOrder.id}`,
+      );
+      return;
+    }
+
+    const tradeValue = tradePrice * normalizedMatchedAmount;
 
     // Validate tradeValue is not NaN
     if (isNaN(tradeValue) || tradeValue <= 0) {
       this.logger.error(
-        `Invalid trade value: tradePrice=${tradePrice}, matchedAmount=${matchedAmount}, orderId=${makerOrder.id}`,
+        `Invalid trade value: tradePrice=${tradePrice}, matchedAmount=${normalizedMatchedAmount}, orderId=${makerOrder.id}`,
       );
       return;
     }
@@ -508,7 +618,7 @@ export class MatchingEngineService implements OnModuleInit {
     const trade = this.tradeRepo.create({
       market: takerOrder.market,
       price: tradePrice,
-      amount: matchedAmount,
+      amount: normalizedMatchedAmount,
       buyOrder,
       sellOrder,
       buyer: buyOrder.user,
@@ -555,63 +665,143 @@ export class MatchingEngineService implements OnModuleInit {
       ]);
 
     if (!buyerQuoteWallet || !buyerBaseWallet || !sellerBaseWallet || !sellerQuoteWallet) {
+      this.logger.error(
+        `Cannot execute trade: missing wallets - buyerQuote: ${!!buyerQuoteWallet}, buyerBase: ${!!buyerBaseWallet}, sellerBase: ${!!sellerBaseWallet}, sellerQuote: ${!!sellerQuoteWallet}`,
+      );
       return;
     }
 
     // --- Cập nhật ví khi có 2 user khác nhau ---
-    // Use WalletCalculationService for all balance updates
-    if (takerOrder.side === OrderSide.BUY) {
-      // Buyer (taker): Unlock frozen quote, add available base
-      this.walletCalculationService.subtractFromFrozen(buyerQuoteWallet, tradeValue);
-      this.walletCalculationService.addToAvailable(buyerBaseWallet, matchedAmount);
+    // Use transaction to prevent race conditions when multiple trades update same wallets
+    await this.dataSource.transaction(async (manager) => {
+      // Reload wallets within transaction with row-level locking to prevent race conditions
+      const [
+        lockedBuyerQuoteWallet,
+        lockedBuyerBaseWallet,
+        lockedSellerBaseWallet,
+        lockedSellerQuoteWallet,
+      ] = await Promise.all([
+        manager.findOne(Wallet, {
+          where: {
+            id: buyerQuoteWallet.id,
+          },
+          lock: { mode: 'pessimistic_write' },
+        }),
+        manager.findOne(Wallet, {
+          where: {
+            id: buyerBaseWallet.id,
+          },
+          lock: { mode: 'pessimistic_write' },
+        }),
+        manager.findOne(Wallet, {
+          where: {
+            id: sellerBaseWallet.id,
+          },
+          lock: { mode: 'pessimistic_write' },
+        }),
+        manager.findOne(Wallet, {
+          where: {
+            id: sellerQuoteWallet.id,
+          },
+          lock: { mode: 'pessimistic_write' },
+        }),
+      ]);
 
-      // Seller (maker): Unlock frozen base, add available quote
-      this.walletCalculationService.subtractFromFrozen(sellerBaseWallet, matchedAmount);
-      this.walletCalculationService.addToAvailable(sellerQuoteWallet, tradeValue);
-    } else if (takerOrder.side === OrderSide.SELL) {
-      // Seller (taker): Unlock frozen base, add available quote
-      this.walletCalculationService.subtractFromFrozen(sellerBaseWallet, matchedAmount);
-      this.walletCalculationService.addToAvailable(sellerQuoteWallet, tradeValue);
+      if (
+        !lockedBuyerQuoteWallet ||
+        !lockedBuyerBaseWallet ||
+        !lockedSellerBaseWallet ||
+        !lockedSellerQuoteWallet
+      ) {
+        this.logger.error(
+          `Cannot find wallets in transaction for trade: buyerQuote=${buyerQuoteWallet.id}, buyerBase=${buyerBaseWallet.id}, sellerBase=${sellerBaseWallet.id}, sellerQuote=${sellerQuoteWallet.id}`,
+        );
+        return;
+      }
 
-      // Buyer (maker): Unlock frozen quote, add available base
-      this.walletCalculationService.subtractFromFrozen(buyerQuoteWallet, tradeValue);
-      this.walletCalculationService.addToAvailable(buyerBaseWallet, matchedAmount);
-    }
+      // Use WalletCalculationService for all balance updates
+      if (takerOrder.side === OrderSide.BUY) {
+        // Buyer (taker): Unlock frozen quote, add available base
+        this.walletCalculationService.subtractFromFrozen(lockedBuyerQuoteWallet, tradeValue);
+        this.walletCalculationService.addToAvailable(
+          lockedBuyerBaseWallet,
+          normalizedMatchedAmount,
+        );
 
-    // Recalculate all balances
-    this.walletCalculationService.recalculateBalances(
-      buyerQuoteWallet,
-      buyerBaseWallet,
-      sellerBaseWallet,
-      sellerQuoteWallet,
-    );
+        // Seller (maker): Unlock frozen base, add available quote
+        this.walletCalculationService.subtractFromFrozen(
+          lockedSellerBaseWallet,
+          normalizedMatchedAmount,
+        );
+        this.walletCalculationService.addToAvailable(lockedSellerQuoteWallet, tradeValue);
+      } else if (takerOrder.side === OrderSide.SELL) {
+        // Seller (taker): Unlock frozen base, add available quote
+        this.walletCalculationService.subtractFromFrozen(
+          lockedSellerBaseWallet,
+          normalizedMatchedAmount,
+        );
+        this.walletCalculationService.addToAvailable(lockedSellerQuoteWallet, tradeValue);
 
-    // --- Kiểm tra an toàn ---
-    if (
-      !this.walletCalculationService.areValidWallets(
-        buyerQuoteWallet,
-        buyerBaseWallet,
-        sellerBaseWallet,
-        sellerQuoteWallet,
-      )
-    ) {
-      return;
-    }
+        // Buyer (maker): Unlock frozen quote, add available base
+        this.walletCalculationService.subtractFromFrozen(lockedBuyerQuoteWallet, tradeValue);
+        this.walletCalculationService.addToAvailable(
+          lockedBuyerBaseWallet,
+          normalizedMatchedAmount,
+        );
+      }
 
-    // --- Ghi thay đổi vào DB ---
-    await this.walletRepo.save([
-      buyerQuoteWallet,
-      buyerBaseWallet,
-      sellerBaseWallet,
-      sellerQuoteWallet,
-    ]);
+      // Recalculate all balances
+      this.walletCalculationService.recalculateBalances(
+        lockedBuyerQuoteWallet,
+        lockedBuyerBaseWallet,
+        lockedSellerBaseWallet,
+        lockedSellerQuoteWallet,
+      );
+
+      // --- Kiểm tra an toàn ---
+      if (
+        !this.walletCalculationService.areValidWallets(
+          lockedBuyerQuoteWallet,
+          lockedBuyerBaseWallet,
+          lockedSellerBaseWallet,
+          lockedSellerQuoteWallet,
+        )
+      ) {
+        this.logger.error(
+          `Invalid wallet state after trade calculation. Trade aborted. takerOrder=${takerOrder.id}, makerOrder=${makerOrder.id}`,
+        );
+        throw new Error('Invalid wallet state after trade calculation');
+      }
+
+      // --- Ghi thay đổi vào DB trong transaction ---
+      await manager.save([
+        lockedBuyerQuoteWallet,
+        lockedBuyerBaseWallet,
+        lockedSellerBaseWallet,
+        lockedSellerQuoteWallet,
+      ]);
+
+      // Update wallet references for ledger entries (outside transaction but using updated values)
+      buyerQuoteWallet.available = lockedBuyerQuoteWallet.available;
+      buyerQuoteWallet.frozen = lockedBuyerQuoteWallet.frozen;
+      buyerQuoteWallet.balance = lockedBuyerQuoteWallet.balance;
+      buyerBaseWallet.available = lockedBuyerBaseWallet.available;
+      buyerBaseWallet.frozen = lockedBuyerBaseWallet.frozen;
+      buyerBaseWallet.balance = lockedBuyerBaseWallet.balance;
+      sellerBaseWallet.available = lockedSellerBaseWallet.available;
+      sellerBaseWallet.frozen = lockedSellerBaseWallet.frozen;
+      sellerBaseWallet.balance = lockedSellerBaseWallet.balance;
+      sellerQuoteWallet.available = lockedSellerQuoteWallet.available;
+      sellerQuoteWallet.frozen = lockedSellerQuoteWallet.frozen;
+      sellerQuoteWallet.balance = lockedSellerQuoteWallet.balance;
+    });
 
     // --- Lưu bản ghi vào transactions ---
     const buyerTransaction = this.transactionRepo.create({
       user: buyerUser,
       wallet: buyerBaseWallet,
       type: TransactionType.TRADE_BUY,
-      amount: matchedAmount,
+      amount: normalizedMatchedAmount,
       currency: market.baseAsset,
       status: TransactionStatus.COMPLETED,
       createdAt: new Date(),
@@ -647,8 +837,8 @@ export class MatchingEngineService implements OnModuleInit {
         user: { id: buyerUser.id },
         wallet: { id: buyerBaseWallet.id },
         currency: market.baseAsset,
-        changeAmount: matchedAmount,
-        balanceBefore: Number(buyerBaseWallet.balance) - matchedAmount,
+        changeAmount: normalizedMatchedAmount,
+        balanceBefore: Number(buyerBaseWallet.balance) - normalizedMatchedAmount,
         balanceAfter: Number(buyerBaseWallet.balance),
         referenceType: LedgerReferenceType.TRADE_BUY,
         referenceId: String(trade.id),
@@ -660,8 +850,8 @@ export class MatchingEngineService implements OnModuleInit {
         user: { id: sellerUser.id },
         wallet: { id: sellerBaseWallet.id },
         currency: market.baseAsset,
-        changeAmount: -matchedAmount,
-        balanceBefore: Number(sellerBaseWallet.balance) + matchedAmount,
+        changeAmount: -normalizedMatchedAmount,
+        balanceBefore: Number(sellerBaseWallet.balance) + normalizedMatchedAmount,
         balanceAfter: Number(sellerBaseWallet.balance),
         referenceType: LedgerReferenceType.TRADE_SELL,
         referenceId: String(trade.id),
@@ -684,7 +874,7 @@ export class MatchingEngineService implements OnModuleInit {
     ];
     await this.ledgerRepo.save(ledgerEntries);
 
-    // 🔥 Aggregate trade into candles (fire-and-forget to avoid blocking)
+    //   Aggregate trade into candles (fire-and-forget to avoid blocking)
     // Don't await - let it run in background so it doesn't delay order processing
     this.candlesService
       .aggregateTradeToCandle(trade, [
@@ -707,18 +897,18 @@ export class MatchingEngineService implements OnModuleInit {
         // Silently fail - candle aggregation should not block trade execution
       });
 
-    // 🔥 Emit WebSocket events to notify users about trade execution
+    //   Emit WebSocket events to notify users about trade execution
     this.wsGateway.emitTradeExecuted({
       tradeId: String(trade.id),
       buyerId: String(buyerUser.id),
       sellerId: String(sellerUser.id),
       symbol: market.symbol,
       price: tradePrice,
-      amount: matchedAmount,
+      amount: normalizedMatchedAmount,
       takerSide: takerOrder.side === OrderSide.BUY ? 'BUY' : 'SELL',
     });
 
-    // 🔥 Explicitly broadcast ticker update (don't wait for async)
+    //   Explicitly broadcast ticker update (don't wait for async)
     // This ensures lastPrice, change24h, volume update immediately
     void this.wsGateway.broadcastTickerUpdate(market.symbol);
 

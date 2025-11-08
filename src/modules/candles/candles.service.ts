@@ -237,8 +237,11 @@ export class CandlesService {
     // Reverse to get chronological order (lightweight-charts expects oldest first)
     candles.reverse();
 
+    // Fill gaps with empty candles to ensure continuous data
+    const filledCandles = this.fillCandleGaps(candles, timeframe);
+
     // Convert to DTO format expected by lightweight-charts (Unix timestamp in seconds)
-    return candles.map((candle) => ({
+    return filledCandles.map((candle) => ({
       time: Math.floor(candle.timestamp.getTime() / 1000),
       open: Number(candle.open),
       high: Number(candle.high),
@@ -246,6 +249,91 @@ export class CandlesService {
       close: Number(candle.close),
       volume: Number(candle.volume),
     }));
+  }
+
+  /**
+   * Fill gaps between candles with empty candles (no trades in that period)
+   * Empty candles have: open = close = previous close, high = low = previous close, volume = 0
+   * Limits the number of empty candles to prevent excessive data generation
+   */
+  private fillCandleGaps(candles: Candle[], timeframe: Timeframe): Candle[] {
+    if (candles.length === 0) {
+      return candles;
+    }
+
+    const intervalMs = this.timeframeMs[timeframe];
+    const filled: Candle[] = [candles[0]]; // Start with first candle
+    const MAX_EMPTY_CANDLES_PER_GAP = 100; // Limit empty candles per gap to prevent excessive data
+    let totalEmptyCandles = 0;
+    const MAX_TOTAL_EMPTY_CANDLES = 500; // Total limit for all gaps combined
+
+    for (let i = 1; i < candles.length; i++) {
+      const prevCandle = candles[i - 1];
+      const currentCandle = candles[i];
+
+      const prevTime = prevCandle.timestamp.getTime();
+      const currentTime = currentCandle.timestamp.getTime();
+      const expectedNextTime = prevTime + intervalMs;
+
+      // If there's a gap (more than one interval between candles)
+      if (currentTime > expectedNextTime) {
+        // Calculate how many intervals are missing
+        const missingIntervals = Math.floor((currentTime - expectedNextTime) / intervalMs);
+        const intervalsToFill = Math.min(
+          missingIntervals,
+          MAX_EMPTY_CANDLES_PER_GAP,
+          MAX_TOTAL_EMPTY_CANDLES - totalEmptyCandles,
+        );
+
+        // Create empty candles for each missing interval (up to limit)
+        for (let j = 1; j <= intervalsToFill; j++) {
+          const gapTime = new Date(prevTime + j * intervalMs);
+          const previousClose = Number(prevCandle.close);
+
+          // Create empty candle: open = close = previous close, volume = 0
+          // Note: We create a plain object, not a DB entity, since we don't save empty candles
+          const emptyCandle: Candle = {
+            id: '', // Not saved to DB, so no ID needed
+            symbol: prevCandle.symbol,
+            timeframe: prevCandle.timeframe,
+            timestamp: gapTime,
+            open: previousClose,
+            high: previousClose,
+            low: previousClose,
+            close: previousClose,
+            volume: 0,
+            market: prevCandle.market,
+            createdAt: gapTime,
+            updatedAt: gapTime,
+          } as Candle;
+
+          filled.push(emptyCandle);
+          totalEmptyCandles++;
+
+          // Stop if we've reached the total limit
+          if (totalEmptyCandles >= MAX_TOTAL_EMPTY_CANDLES) {
+            this.logger.warn(
+              `Reached maximum empty candles limit (${MAX_TOTAL_EMPTY_CANDLES}) while filling gaps. Some gaps may remain unfilled.`,
+            );
+            // Add remaining real candles and return
+            filled.push(...candles.slice(i));
+            return filled;
+          }
+        }
+
+        // Log if we couldn't fill all gaps
+        if (intervalsToFill < missingIntervals) {
+          this.logger.debug(
+            `Gap between ${new Date(prevTime).toISOString()} and ${new Date(currentTime).toISOString()} has ${missingIntervals} missing intervals, but only filled ${intervalsToFill} due to limits.`,
+          );
+        }
+      }
+
+      // Add the current candle
+      filled.push(currentCandle);
+    }
+
+    return filled;
   }
 
   /**

@@ -16,21 +16,22 @@ DELETE /api/dev/reset-database
 
 **What it does**:
 
-1. ✅ Clears all Redis data (order books, queues, etc.)
-2. ✅ Deletes all trades
-3. ✅ Deletes all orders
-4. ✅ Deletes all ledger entries
-5. ✅ Deletes all transactions
-6. ✅ Resets all wallets to initial values:
-   - **Base Token (USDT)**: 100,000
-   - **Asset Token (BTC)**: 100
+1.  Clears all Redis data (order books, queues, etc.)
+2.  Deletes all trades
+3.  Deletes all orders
+4.  Deletes all ledger entries
+5.  Deletes all transactions
+6.  Resets all wallets to initial values:
+
+- **Base Token (USDT)**: 100,000
+- **Asset Token (BTC)**: 100
 
 **What it preserves**:
 
-- ❌ Users
-- ❌ User profiles
-- ❌ Markets
-- ❌ Wallets (structure preserved, balances reset)
+- Users
+- User profiles
+- Markets
+- Wallets (structure preserved, balances reset)
 
 ---
 
@@ -120,9 +121,9 @@ curl -X DELETE http://localhost:8000/api/dev/reset-database \
 
 The reset operation uses **database transactions** to ensure atomicity:
 
-- ✅ All operations succeed OR all fail (no partial resets)
-- ✅ Automatic rollback on any error
-- ✅ Database consistency guaranteed
+- All operations succeed OR all fail (no partial resets)
+- Automatic rollback on any error
+- Database consistency guaranteed
 
 ---
 
@@ -151,7 +152,7 @@ The service outputs detailed logs during reset:
 
 ---
 
-## ⚠️ Security Warning
+## Security Warning
 
 **This endpoint is ONLY for development/testing!**
 

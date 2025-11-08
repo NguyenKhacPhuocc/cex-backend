@@ -202,14 +202,49 @@ export class TradingWebSocketGateway
   }) {
     const { tradeId, buyerId, sellerId, symbol, price, amount, takerSide } = tradeData;
 
+    // Validate data to prevent NaN/Invalid values
+    if (
+      !tradeId ||
+      !buyerId ||
+      !sellerId ||
+      !symbol ||
+      typeof price !== 'number' ||
+      typeof amount !== 'number' ||
+      isNaN(price) ||
+      isNaN(amount) ||
+      price <= 0 ||
+      amount <= 0
+    ) {
+      this.logger.error(
+        `[WebSocket] Invalid trade data, skipping emit: ${JSON.stringify(tradeData)}`,
+      );
+      return;
+    }
+
+    // Ensure price and amount are valid numbers (not NaN/Infinity)
+    const validPrice = Number(price);
+    const validAmount = Number(amount);
+
+    if (
+      isNaN(validPrice) ||
+      isNaN(validAmount) ||
+      !isFinite(validPrice) ||
+      !isFinite(validAmount)
+    ) {
+      this.logger.error(
+        `[WebSocket] Invalid price/amount after conversion, skipping emit: price=${validPrice}, amount=${validAmount}`,
+      );
+      return;
+    }
+
     // Notify buyer (always BUY side)
     this.server.to(`user:${buyerId}`).emit('trade:executed', {
       tradeId,
       userId: buyerId,
       side: 'BUY',
       symbol,
-      price,
-      amount,
+      price: validPrice,
+      amount: validAmount,
       timestamp: Date.now(),
     });
 
@@ -219,16 +254,16 @@ export class TradingWebSocketGateway
       userId: sellerId,
       side: 'SELL',
       symbol,
-      price,
-      amount,
+      price: validPrice,
+      amount: validAmount,
       timestamp: Date.now(),
     });
 
     // Also broadcast to all orderbook subscribers (public market trade)
     this.broadcastMarketTrade(symbol, {
       id: parseInt(tradeId),
-      price,
-      amount,
+      price: validPrice,
+      amount: validAmount,
       side: takerSide, // Use takerSide for color display (BUY = green, SELL = red)
       timestamp: new Date(),
     });

@@ -44,7 +44,7 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
       });
 
       if (markets.length === 0) {
-        this.logger.warn('[BINANCE_US_INIT] ⚠️ No active markets found in database');
+        this.logger.warn('[BINANCE_US_INIT]   No active markets found in database');
         return;
       }
 
@@ -57,10 +57,10 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
       }
 
       const mapSize = this.symbolToInternalMap.size;
-      this.logger.log(`[BINANCE_US_INIT] ✅ Symbol mapping initialized with ${mapSize} markets`);
+      this.logger.log(`[BINANCE_US_INIT]  Symbol mapping initialized with ${mapSize} markets`);
     } catch (error) {
       const msg = (error as Error).message;
-      this.logger.error(`[BINANCE_US_INIT] ❌ Failed to initialize: ${msg}`);
+      this.logger.error(`[BINANCE_US_INIT]   Failed to initialize: ${msg}`);
     }
   }
 
@@ -70,7 +70,7 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
    * Rate limit: 1200 requests per minute (20/second) - very generous
    */
   private startPricePolling(): void {
-    this.logger.log('[PRICE_POLLING] 🚀 Starting Binance US API polling...');
+    this.logger.log('[PRICE_POLLING]  Starting Binance US API polling...');
 
     // Initial fetch
     void this.fetchPricesFromBinanceUS();
@@ -78,16 +78,16 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
     // Poll every 5 seconds (safe, fast updates for candles)
     this.pricePollingInterval = setInterval(() => {
       void this.fetchPricesFromBinanceUS();
-    }, 5000);
+    }, 3000);
 
-    this.logger.log('[PRICE_POLLING] ✅ Price polling started (5s interval)');
+    this.logger.log('[PRICE_POLLING]  Price polling started (5s interval)');
   }
 
   private stopPricePolling(): void {
     if (this.pricePollingInterval) {
       clearInterval(this.pricePollingInterval);
       this.pricePollingInterval = null;
-      this.logger.log('[PRICE_POLLING] ⛔ Price polling stopped');
+      this.logger.log('[PRICE_POLLING]  Price polling stopped');
     }
   }
 
@@ -111,18 +111,18 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
 
       this.logger.debug(`[BINANCE_US_API] 📡 Fetching from: ${url.substring(0, 80)}...`);
 
-      const response = await axios.get(url, { timeout: 5000 });
+      const response = await axios.get(url, { timeout: 3000 });
 
       if (response.status !== 200) {
         this.logger.error(
-          `[BINANCE_US_API] ❌ HTTP Error ${response.status}: ${response.statusText}`,
+          `[BINANCE_US_API]   HTTP Error ${response.status}: ${response.statusText}`,
         );
         return;
       }
 
       const data = response.data as Array<{ symbol: string; price: string }>;
       if (!Array.isArray(data) || data.length === 0) {
-        this.logger.warn('[BINANCE_US_API] ⚠️ No price data received');
+        this.logger.warn('[BINANCE_US_API]   No price data received');
         return;
       }
 
@@ -132,7 +132,7 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
         const price = parseFloat(item.price);
 
         if (isNaN(price) || price <= 0) {
-          this.logger.warn(`[BINANCE_US_API] ⚠️ Invalid price for ${binanceSymbol}: ${item.price}`);
+          this.logger.warn(`[BINANCE_US_API]   Invalid price for ${binanceSymbol}: ${item.price}`);
           continue;
         }
 
@@ -146,7 +146,7 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
       }
     } catch (error) {
       const msg = (error as Error).message;
-      this.logger.error(`[BINANCE_US_API] ❌ Failed to fetch prices: ${msg}`);
+      this.logger.error(`[BINANCE_US_API]   Failed to fetch prices: ${msg}`);
       if (error instanceof axios.AxiosError) {
         this.logger.debug(`[BINANCE_US_API] Error Code: ${error.code}`);
         this.logger.debug(`[BINANCE_US_API] Status: ${error.response?.status}`);
@@ -171,7 +171,7 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
 
     if (processedPrices.length > 0) {
       const msg = processedPrices.join(', ');
-      this.logger.log(`[BINANCE_US_PRICES] 💰 Prices: ${msg}`);
+      this.logger.log(`[BINANCE_US_PRICES]  Prices: ${msg}`);
     }
   }
 
@@ -190,7 +190,7 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
     }
 
     const msg = pricesForLog.join(', ');
-    this.logger.log(`[REDIS_FLUSH] 💾 Saved to Redis: ${msg}`);
+    this.logger.log(`[REDIS_FLUSH] Saved to Redis: ${msg}`);
   }
 
   /**
@@ -202,17 +202,33 @@ export class BinanceService implements OnModuleInit, OnModuleDestroy {
       const cached = await this.redisService.get(`binance:price:${symbol}`);
       if (cached) {
         const price = parseFloat(cached);
-        // Comment out debug log để tránh spam log (được gọi mỗi 5 giây cho mỗi market)
-        // this.logger.debug(`[REDIS_GET] 📖 Retrieved ${symbol} from Redis: ${price}`);
         return price;
       }
 
-      // Chỉ log warning khi thực sự không có giá (không log mỗi lần get)
-      // this.logger.warn(`[REDIS_GET] ⚠️ No price in Redis for ${symbol}`);
+      // Fallback to in-memory cache if Redis is unavailable or expired
+      const memoryPrice = this.latestPrices.get(symbol);
+      if (memoryPrice && memoryPrice > 0) {
+        this.logger.debug(
+          `[REDIS_GET]   Redis unavailable for ${symbol}, using cached price: ${memoryPrice}`,
+        );
+        return memoryPrice;
+      }
+
+      // No price available in either cache
       return null;
     } catch (error) {
       const msg = (error as Error).message;
-      this.logger.error(`[REDIS_GET] ❌ Failed to get price: ${msg}`);
+      this.logger.error(`[REDIS_GET]   Failed to get price: ${msg}`);
+
+      // Fallback to in-memory cache on error
+      const memoryPrice = this.latestPrices.get(symbol);
+      if (memoryPrice && memoryPrice > 0) {
+        this.logger.debug(
+          `[REDIS_GET]   Using cached price after error for ${symbol}: ${memoryPrice}`,
+        );
+        return memoryPrice;
+      }
+
       return null;
     }
   }

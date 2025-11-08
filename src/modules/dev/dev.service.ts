@@ -71,7 +71,7 @@ export class DevService {
       this.logger.log('✅ Database reset completed successfully!');
     } catch (error) {
       await queryRunner.rollbackTransaction();
-      this.logger.error('❌ Database reset failed:', error);
+      this.logger.error('  Database reset failed:', error);
       throw error;
     } finally {
       await queryRunner.release();
@@ -207,13 +207,13 @@ export class DevService {
       // Verify all keys are cleared
       const allKeysAfter = await this.redis.keys('*');
       if (allKeysAfter.length > 0) {
-        this.logger.warn(`⚠️ Warning: ${allKeysAfter.length} keys still remain in Redis`);
+        this.logger.warn(`  Warning: ${allKeysAfter.length} keys still remain in Redis`);
         this.logger.warn(`Remaining keys: ${allKeysAfter.join(', ')}`);
       } else {
         this.logger.log('✅ All Redis keys cleared successfully');
       }
     } catch (error) {
-      this.logger.error('❌ Failed to clear Redis:', error);
+      this.logger.error('  Failed to clear Redis:', error);
       throw error;
     }
   }
