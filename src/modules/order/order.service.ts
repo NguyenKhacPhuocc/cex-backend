@@ -63,7 +63,8 @@ export class OrderService implements OnModuleInit {
   }
 
   async createOrder(user: User, createOrderDto: CreateOrderDto): Promise<Order> {
-    const { side, type, price, amount, marketSymbol } = createOrderDto;
+    const { side, type, price, amount, marketSymbol, inputAssetType, originalQuoteAmount } =
+      createOrderDto;
     const maxRetries = 3;
     let retryCount = 0;
     let wallet: Wallet | null = null;
@@ -88,9 +89,75 @@ export class OrderService implements OnModuleInit {
           throw new NotFoundException(`Market ${marketSymbol} not found`);
         }
 
-        // Balance check and locking
+        // Validate minimum order size (BTC amount)
+        // For market orders with USDT input, amount is already converted to BTC
+        if (amount < market.minOrderSize) {
+          throw new BadRequestException(
+            `Minimum order size is ${market.minOrderSize} ${market.baseAsset}`,
+          );
+        }
+
+        // Validate minimum order value for market orders with USDT input
+        const MIN_ORDER_VALUE_USDT = 5;
+        if (type === OrderType.MARKET) {
+          if (side === OrderSide.BUY && inputAssetType === 'quote') {
+            // Market BUY with USDT input
+            if (originalQuoteAmount && originalQuoteAmount < MIN_ORDER_VALUE_USDT) {
+              throw new BadRequestException(
+                `Minimum order value is ${MIN_ORDER_VALUE_USDT} ${market.quoteAsset}`,
+              );
+            }
+          } else if (side === OrderSide.SELL && inputAssetType === 'quote') {
+            // Market SELL with USDT input
+            // Frontend sends the original USDT amount in originalQuoteAmount
+            if (originalQuoteAmount && originalQuoteAmount < MIN_ORDER_VALUE_USDT) {
+              throw new BadRequestException(
+                `Minimum order value is ${MIN_ORDER_VALUE_USDT} ${market.quoteAsset}`,
+              );
+            }
+          }
+        } else {
+          // For LIMIT orders, validate order value (price * amount >= MIN_ORDER_VALUE_USDT)
+          if (price && price > 0) {
+            const orderValue = price * amount;
+            if (orderValue < MIN_ORDER_VALUE_USDT) {
+              throw new BadRequestException(
+                `Minimum order value is ${MIN_ORDER_VALUE_USDT} ${market.quoteAsset}`,
+              );
+            }
+          }
+        }
+        // Determine which wallet to lock based on side and inputAssetType
+        // Default behavior: BUY locks quoteAsset (USDT), SELL locks baseAsset (BTC)
+        let currencyToLock: string;
         const walletToLock = WalletType.SPOT;
-        const currencyToLock = side === OrderSide.BUY ? market.quoteAsset : market.baseAsset;
+
+        // Calculate amount to lock based on order type, side, and inputAssetType
+        if (type === OrderType.MARKET) {
+          // Market order logic with inputAssetType
+          if (side === OrderSide.BUY) {
+            // BUY market order
+            if (inputAssetType === 'base') {
+              // Input is BTC: lock entire USDT balance (buy max BTC)
+              currencyToLock = market.quoteAsset;
+            } else {
+              // Input is USDT (default or explicit): lock specified USDT amount
+              currencyToLock = market.quoteAsset;
+            }
+          } else {
+            // SELL market order
+            if (inputAssetType === 'quote') {
+              // Input is USDT: lock entire BTC balance (sell all to receive USDT)
+              currencyToLock = market.baseAsset;
+            } else {
+              // Input is BTC (default or explicit): lock specified BTC amount
+              currencyToLock = market.baseAsset;
+            }
+          }
+        } else {
+          // LIMIT order: always lock based on side (inputAssetType doesn't matter for limit orders)
+          currencyToLock = side === OrderSide.BUY ? market.quoteAsset : market.baseAsset;
+        }
 
         // Get wallet first to check balance (reload on retry to get latest balance)
         wallet = await this.walletRepo.findOne({
@@ -105,18 +172,43 @@ export class OrderService implements OnModuleInit {
           throw new BadRequestException('Wallet not found');
         }
 
-        // Calculate amount to lock
+        // Calculate amount to lock based on order type, side, and inputAssetType
         if (type === OrderType.MARKET && side === OrderSide.BUY) {
-          // Market BUY order: Lock entire available balance (since we don't know exact price)
-          // This ensures we have enough to cover the trade at any price
-          if (!wallet || wallet.available <= 0) {
-            throw new BadRequestException('Insufficient balance');
+          // Market BUY order
+          if (inputAssetType === 'base') {
+            // Input is BTC: lock entire available USDT balance
+            // This ensures we have enough to buy the specified BTC amount at any price
+            if (!wallet || wallet.available <= 0) {
+              throw new BadRequestException('Insufficient balance');
+            }
+            amountToLock = wallet.available;
+          } else {
+            // Input is USDT: lock the specified USDT amount
+            // Frontend sends originalQuoteAmount with the original USDT amount
+            if (originalQuoteAmount && originalQuoteAmount > 0) {
+              amountToLock = Number(originalQuoteAmount);
+            } else {
+              // Fallback: if originalQuoteAmount not provided, lock all available
+              // This shouldn't happen, but handle gracefully
+              if (!wallet || wallet.available <= 0) {
+                throw new BadRequestException('Insufficient balance');
+              }
+              amountToLock = wallet.available;
+            }
           }
-          // Lock entire available balance for market BUY orders
-          amountToLock = wallet.available;
         } else if (type === OrderType.MARKET && side === OrderSide.SELL) {
-          // Market SELL order: Lock the base asset amount
-          amountToLock = amount;
+          // Market SELL order
+          if (inputAssetType === 'quote') {
+            // Input is USDT: lock entire available BTC balance
+            // This ensures we have enough BTC to sell to receive the specified USDT amount
+            if (!wallet || wallet.available <= 0) {
+              throw new BadRequestException('Insufficient balance');
+            }
+            amountToLock = wallet.available;
+          } else {
+            // Input is BTC: lock the specified BTC amount
+            amountToLock = amount;
+          }
         } else {
           // LIMIT order: Use calculated amount with price
           if (!price || price <= 0 || isNaN(price)) {
@@ -247,22 +339,44 @@ export class OrderService implements OnModuleInit {
     return serializedOrders;
   }
 
-  async getUserOrderHistory(user: User): Promise<Order[]> {
-    const orders = await this.orderRepo.find({
+  async getUserOrderHistory(
+    user: User,
+    pagination: { page?: number; limit?: number } = { page: 1, limit: 20 },
+  ): Promise<{
+    data: Order[];
+    total: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+  }> {
+    const { page = 1, limit = 20 } = pagination;
+    const skip = (page - 1) * limit;
+
+    const [orders, total] = await this.orderRepo.findAndCount({
       where: {
         user: { id: user.id },
         status: Not(In([OrderStatus.OPEN])),
       },
       relations: ['market'],
       order: { createdAt: 'DESC' },
-      take: 50, // Pagination to prevent loading too many records
+      skip,
+      take: limit,
     });
+
     // Serialize Date fields to ISO string for proper JSON serialization
-    return orders.map((order) => ({
+    const data = orders.map((order) => ({
       ...order,
       createdAt: order.createdAt ? new Date(order.createdAt).toISOString() : null,
       updatedAt: order.updatedAt ? new Date(order.updatedAt).toISOString() : null,
     })) as any as Order[];
+
+    return {
+      data,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
   }
 
   async getOrderById(user: User, orderId: string): Promise<Order> {
@@ -405,15 +519,23 @@ export class OrderService implements OnModuleInit {
               amountToUnlock = Math.max(0, currentFrozenBalance - totalFrozenFromOtherOrders);
             }
           } else {
-            // Market SELL: remainingAmount is exact (baseAsset)
-            // But need to exclude other orders' frozen
+            // Market SELL: Unlock remaining frozen balance
+            // Note: For SELL market orders with input USDT, we locked the entire BTC balance
+            // But order.amount only represents the estimated BTC needed
+            // So we need to unlock all remaining frozen balance (after excluding other orders' frozen)
+            // The actual BTC used in trades has already been subtracted from frozen
             if (currentFrozenBalance > totalFrozenFromOtherOrders) {
-              amountToUnlock = Math.min(
-                currentFrozenBalance - totalFrozenFromOtherOrders,
-                remainingAmount,
-              );
+              // Unlock all frozen balance that belongs to this order
+              // Don't limit by remainingAmount because we may have locked more than order.amount
+              amountToUnlock = currentFrozenBalance - totalFrozenFromOtherOrders;
             } else {
-              amountToUnlock = remainingAmount;
+              // If current frozen is less than other orders' frozen, it means
+              // this order's frozen was already used or there's a calculation issue
+              // Unlock whatever is left (should be 0 or very small)
+              amountToUnlock = 0;
+              this.logger.warn(
+                `Market SELL order ${orderEntity.id}: frozen balance calculation issue. Current: ${currentFrozenBalance}, Other orders: ${totalFrozenFromOtherOrders}, remaining: ${remainingAmount}`,
+              );
             }
           }
 

@@ -3,8 +3,8 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Trade } from './entities/trade.entity';
 import { User } from '../users/entities/user.entity';
-
 import { TradeHistoryDto } from './dtos/trade-history.dto';
+import { PaginationDto, PaginatedResponse } from 'src/common/dtos/pagination.dto';
 
 @Injectable()
 export class TradesService {
@@ -13,14 +13,28 @@ export class TradesService {
     private tradeRepository: Repository<Trade>,
   ) {}
 
-  async getUserTrades(user: User): Promise<TradeHistoryDto[]> {
+  async getUserTrades(
+    user: User,
+    pagination: PaginationDto = { page: 1, limit: 20 },
+  ): Promise<PaginatedResponse<TradeHistoryDto>> {
+    const { page = 1, limit = 20 } = pagination;
+    const skip = (page - 1) * limit;
+
+    // Get total count
+    const total = await this.tradeRepository.count({
+      where: [{ buyer: { id: user.id } }, { seller: { id: user.id } }],
+    });
+
+    // Get paginated trades
     const trades = await this.tradeRepository.find({
       where: [{ buyer: { id: user.id } }, { seller: { id: user.id } }],
       order: { timestamp: 'DESC' },
       relations: ['market', 'buyer', 'seller'],
+      skip,
+      take: limit,
     });
 
-    return trades.map((trade) => {
+    const data = trades.map((trade) => {
       const isBuyer = trade.buyer.id === user.id;
       const total = Number(trade.price) * Number(trade.amount);
 
@@ -42,6 +56,14 @@ export class TradesService {
       };
       return dto;
     });
+
+    return {
+      data,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
   }
 
   async getUserTradeBySymbol(user: User, symbol: string): Promise<TradeHistoryDto[]> {

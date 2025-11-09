@@ -19,4 +19,13 @@ export class CreateOrderDto {
 
   @IsString()
   marketSymbol: string;
+
+  @IsEnum(['base', 'quote'])
+  @IsOptional()
+  inputAssetType?: 'base' | 'quote'; // 'base' = base asset (BTC), 'quote' = quote asset (USDT)
+
+  @IsNumber()
+  @IsOptional()
+  @Min(0.00001, { message: 'Original quote amount must be greater than 0' })
+  originalQuoteAmount?: number; // Original USDT amount when inputAssetType is 'quote' (for market orders)
 }

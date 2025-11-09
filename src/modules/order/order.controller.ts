@@ -1,4 +1,4 @@
-import { Controller, UseGuards, Post, Body, Get, Param } from '@nestjs/common';
+import { Controller, UseGuards, Post, Body, Get, Param, Query } from '@nestjs/common';
 import { User, UserRole } from '../users/entities/user.entity';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { GetUser } from 'src/common/decorators/get-user.decorator';
@@ -38,9 +38,16 @@ export class OrderController {
   //Lịch sử đặt lệnh (đã khớp/hủy) của user, Truy vấn PostgreSQL (orders) có status != open.
   @Get('history')
   @Roles(UserRole.USER)
-  async getUserOrderHistory(@GetUser() user: User): Promise<Order[]> {
-    const orders = await this.orderService.getUserOrderHistory(user);
-    return orders;
+  async getUserOrderHistory(
+    @GetUser() user: User,
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+  ) {
+    const pagination = {
+      page: page ? Number(page) : 1,
+      limit: limit ? Number(limit) : 20,
+    };
+    return this.orderService.getUserOrderHistory(user, pagination);
   }
 
   // lấy chi tiết một lệnh theo id

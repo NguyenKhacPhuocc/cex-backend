@@ -275,17 +275,23 @@ export class MatchingEngineService implements OnModuleInit {
             frozenToUnlock = Math.max(0, currentFrozenBalance - totalFrozenFromOtherOrders);
           }
         } else {
-          // Market SELL: remainingAmount is exact (baseAsset)
-          // But need to exclude other orders' frozen
+          // Market SELL: Unlock remaining frozen balance
+          // Note: For SELL market orders with input USDT, we locked the entire BTC balance
+          // But order.amount only represents the estimated BTC needed
+          // So we need to unlock all remaining frozen balance (after excluding other orders' frozen)
+          // The actual BTC used in trades has already been subtracted from frozen
           if (currentFrozenBalance > totalFrozenFromOtherOrders) {
-            frozenToUnlock = Math.min(
-              currentFrozenBalance - totalFrozenFromOtherOrders,
-              remainingAmount,
-            );
+            // Unlock all frozen balance that belongs to this order
+            // Don't limit by remainingAmount because we may have locked more than order.amount
+            frozenToUnlock = currentFrozenBalance - totalFrozenFromOtherOrders;
           } else {
             // If current frozen is less than other orders' frozen, it means
-            // this order's frozen was already used, unlock remainingAmount as fallback
-            frozenToUnlock = remainingAmount;
+            // this order's frozen was already used or there's a calculation issue
+            // Unlock whatever is left (should be 0 or very small)
+            frozenToUnlock = 0;
+            this.logger.warn(
+              `Market SELL order ${order.id}: frozen balance calculation issue. Current: ${currentFrozenBalance}, Other orders: ${totalFrozenFromOtherOrders}, remaining: ${remainingAmount}`,
+            );
           }
         }
 
