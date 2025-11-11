@@ -15,6 +15,7 @@ import {
 import { RedisPubSub } from 'src/core/redis/redis.pubsub';
 import { Order } from './entities/order.entity';
 import { User } from '../users/entities/user.entity';
+import { Market } from '../market/entities/market.entity';
 import { MarketService } from '../market/market.service';
 import { CreateOrderDto } from './dtos/create-order.dto';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -97,36 +98,6 @@ export class OrderService implements OnModuleInit {
           );
         }
 
-        // Validate minimum order value for market orders with USDT input
-        const MIN_ORDER_VALUE_USDT = 5;
-        if (type === OrderType.MARKET) {
-          if (side === OrderSide.BUY && inputAssetType === 'quote') {
-            // Market BUY with USDT input
-            if (originalQuoteAmount && originalQuoteAmount < MIN_ORDER_VALUE_USDT) {
-              throw new BadRequestException(
-                `Minimum order value is ${MIN_ORDER_VALUE_USDT} ${market.quoteAsset}`,
-              );
-            }
-          } else if (side === OrderSide.SELL && inputAssetType === 'quote') {
-            // Market SELL with USDT input
-            // Frontend sends the original USDT amount in originalQuoteAmount
-            if (originalQuoteAmount && originalQuoteAmount < MIN_ORDER_VALUE_USDT) {
-              throw new BadRequestException(
-                `Minimum order value is ${MIN_ORDER_VALUE_USDT} ${market.quoteAsset}`,
-              );
-            }
-          }
-        } else {
-          // For LIMIT orders, validate order value (price * amount >= MIN_ORDER_VALUE_USDT)
-          if (price && price > 0) {
-            const orderValue = price * amount;
-            if (orderValue < MIN_ORDER_VALUE_USDT) {
-              throw new BadRequestException(
-                `Minimum order value is ${MIN_ORDER_VALUE_USDT} ${market.quoteAsset}`,
-              );
-            }
-          }
-        }
         // Determine which wallet to lock based on side and inputAssetType
         // Default behavior: BUY locks quoteAsset (USDT), SELL locks baseAsset (BTC)
         let currencyToLock: string;
@@ -178,7 +149,7 @@ export class OrderService implements OnModuleInit {
           if (inputAssetType === 'base') {
             // Input is BTC: lock entire available USDT balance
             // This ensures we have enough to buy the specified BTC amount at any price
-            if (!wallet || wallet.available <= 0) {
+            if (wallet.available <= 0) {
               throw new BadRequestException('Insufficient balance');
             }
             amountToLock = wallet.available;
@@ -190,7 +161,7 @@ export class OrderService implements OnModuleInit {
             } else {
               // Fallback: if originalQuoteAmount not provided, lock all available
               // This shouldn't happen, but handle gracefully
-              if (!wallet || wallet.available <= 0) {
+              if (wallet.available <= 0) {
                 throw new BadRequestException('Insufficient balance');
               }
               amountToLock = wallet.available;
@@ -201,7 +172,7 @@ export class OrderService implements OnModuleInit {
           if (inputAssetType === 'quote') {
             // Input is USDT: lock entire available BTC balance
             // This ensures we have enough BTC to sell to receive the specified USDT amount
-            if (!wallet || wallet.available <= 0) {
+            if (wallet.available <= 0) {
               throw new BadRequestException('Insufficient balance');
             }
             amountToLock = wallet.available;
@@ -222,24 +193,55 @@ export class OrderService implements OnModuleInit {
           throw new BadRequestException(`Invalid amount to lock: ${amountToLock}`);
         }
 
-        if (!wallet || wallet.available < amountToLock) {
-          throw new BadRequestException('Insufficient balance');
-        }
+        // --- TẤT CẢ OPERATIONS TRONG MỘT TRANSACTION ĐỂ ĐẢM BẢO ACID ---
+        const savedOrder = await this.walletRepo.manager.transaction(
+          async (transactionalManager) => {
+            // --- 1. Load wallet với pessimistic locking để đảm bảo Isolation ---
+            const lockedWallet = await transactionalManager.findOne(Wallet, {
+              where: {
+                id: wallet!.id, // wallet is already checked above
+              },
+              lock: { mode: 'pessimistic_write' },
+            });
 
-        // Use WalletCalculationService for balance locking
-        this.walletCalculationService.lockBalance(wallet, amountToLock);
-        await this.walletRepo.save(wallet);
+            if (!lockedWallet) {
+              throw new BadRequestException('Wallet not found or locked');
+            }
 
-        const order = this.orderRepo.create({
-          user,
-          market,
-          side,
-          type,
-          price,
-          amount,
-          status: OrderStatus.OPEN,
-        });
-        const savedOrder = await this.orderRepo.save(order);
+            // --- 2. Validate balance trong transaction (đảm bảo Consistency) ---
+            if (lockedWallet.available < amountToLock) {
+              throw new BadRequestException('Insufficient balance');
+            }
+
+            // --- 3. Lock balance trong transaction ---
+            this.walletCalculationService.lockBalance(lockedWallet, amountToLock);
+
+            // --- 4. Recalculate balance để đảm bảo Consistency ---
+            this.walletCalculationService.recalculateBalance(lockedWallet);
+
+            // --- 5. Validate wallet state ---
+            if (!this.walletCalculationService.isValidWallet(lockedWallet)) {
+              throw new Error('Invalid wallet state after balance lock');
+            }
+
+            // --- 6. Save wallet trong transaction ---
+            await transactionalManager.save(lockedWallet);
+
+            // --- 7. Create order trong transaction ---
+            const order = transactionalManager.create(Order, {
+              user,
+              market,
+              side,
+              type,
+              price,
+              amount,
+              status: OrderStatus.OPEN,
+            });
+            const savedOrder = await transactionalManager.save(order);
+
+            return savedOrder;
+          },
+        );
 
         // Ensure market data is included when enqueuing
         // TypeORM might not return the full market relation, so we explicitly include it
@@ -281,27 +283,12 @@ export class OrderService implements OnModuleInit {
           this.logger.warn(
             `Deadlock detected for order creation (user: ${user.id}, market: ${marketSymbol}), retrying... (${retryCount}/${maxRetries})`,
           );
-          // Revert balance lock if it was set before retry
-          if (wallet && amountToLock > 0) {
-            try {
-              this.walletCalculationService.unlockBalance(wallet, amountToLock);
-              await this.walletRepo.save(wallet);
-            } catch {
-              // Ignore unlock errors during retry
-            }
-          }
+          // Note: No need to unlock balance - transaction will rollback automatically
           continue;
         }
 
-        // Revert balance lock if order creation fails (not a retryable deadlock)
-        if (wallet && amountToLock > 0) {
-          try {
-            this.walletCalculationService.unlockBalance(wallet, amountToLock);
-            await this.walletRepo.save(wallet);
-          } catch (unlockError) {
-            this.logger.error(`Failed to unlock balance after order creation error:`, unlockError);
-          }
-        }
+        // Note: No need to manually unlock balance - transaction rollback handles it automatically
+        // If transaction fails, all changes (wallet lock, order creation) are rolled back
         throw error;
       }
     }
@@ -411,20 +398,39 @@ export class OrderService implements OnModuleInit {
       order as unknown as Record<string, unknown>,
     );
 
-    // Transaction đảm bảo đồng bộ
+    // --- TẤT CẢ OPERATIONS TRONG MỘT TRANSACTION ĐỂ ĐẢM BẢO ACID ---
     await this.dataSource.transaction(async (manager) => {
-      // Reload order entity in transaction to ensure it's a proper entity instance
+      // --- 1. Reload order entity với lock để đảm bảo Isolation ---
+      // Không load relations trong query có lock để tránh lỗi "FOR UPDATE cannot be applied to the nullable side of an outer join"
       const orderEntity = await manager.findOne(Order, {
         where: { id: orderId },
-        relations: ['market'],
+        lock: { mode: 'pessimistic_write' }, // Lock order to prevent concurrent cancellation
       });
 
       if (!orderEntity) {
         throw new NotFoundException(`Order not found`);
       }
 
-      orderEntity.status = OrderStatus.CANCELED;
-      await manager.save(orderEntity);
+      // Load market relation riêng sau khi đã lock order
+      // Sử dụng market từ order ban đầu (đã có market relation từ getOrderById)
+      if (!order.market?.id) {
+        throw new NotFoundException(`Market not found for order ${orderId}`);
+      }
+      const market = await manager.findOne(Market, {
+        where: { id: order.market.id },
+      });
+      if (!market) {
+        throw new NotFoundException(`Market not found for order ${orderId}`);
+      }
+      orderEntity.market = market;
+
+      // --- 2. Validate order status ---
+      if (
+        orderEntity.status !== OrderStatus.OPEN &&
+        orderEntity.status !== OrderStatus.PARTIALLY_FILLED
+      ) {
+        throw new BadRequestException(`Cannot cancel order with status ${orderEntity.status}`);
+      }
 
       const remainingAmount = Number(orderEntity.amount) - Number(orderEntity.filled);
 
@@ -434,12 +440,14 @@ export class OrderService implements OnModuleInit {
           ? orderEntity.market.quoteAsset
           : orderEntity.market.baseAsset;
 
+      // --- 3. Load wallet với pessimistic locking để đảm bảo Isolation ---
       const wallet = await manager.findOne(Wallet, {
         where: {
           user: { id: user.id },
           currency: currencyToUnlock,
           walletType: WalletType.SPOT,
         },
+        lock: { mode: 'pessimistic_write' },
       });
 
       if (!wallet) {
@@ -567,9 +575,19 @@ export class OrderService implements OnModuleInit {
               : remainingAmount;
         }
 
-        // Unlock balance if amount is valid
+        // --- 4. Unlock balance nếu amount hợp lệ ---
         if (amountToUnlock > 0 && !isNaN(amountToUnlock)) {
           this.walletCalculationService.unlockBalance(wallet, amountToUnlock);
+
+          // --- 5. Recalculate balance để đảm bảo Consistency ---
+          this.walletCalculationService.recalculateBalance(wallet);
+
+          // --- 6. Validate wallet state ---
+          if (!this.walletCalculationService.isValidWallet(wallet)) {
+            throw new Error('Invalid wallet state after balance unlock');
+          }
+
+          // --- 7. Save wallet trong transaction ---
           await manager.save(wallet);
           this.logger.log(
             `Unlocked ${amountToUnlock} ${currencyToUnlock} for canceled ${orderEntity.type} ${orderEntity.side} order ${orderEntity.id}`,
@@ -580,6 +598,10 @@ export class OrderService implements OnModuleInit {
           );
         }
       }
+
+      // --- 8. Update order status trong transaction ---
+      orderEntity.status = OrderStatus.CANCELED;
+      await manager.save(orderEntity);
     });
 
     // Thông báo cập nhật UI
@@ -616,6 +638,7 @@ export class OrderService implements OnModuleInit {
       return 0;
     }
 
+    // --- TẤT CẢ OPERATIONS TRONG MỘT TRANSACTION ĐỂ ĐẢM BẢO ACID ---
     await this.dataSource.transaction(async (manager) => {
       const amountsToUnlock = new Map<string, number>();
 
@@ -655,20 +678,32 @@ export class OrderService implements OnModuleInit {
 
       for (const [currency, amount] of amountsToUnlock.entries()) {
         if (amount <= 0 || isNaN(amount)) continue;
+        // --- Load wallet với pessimistic locking để đảm bảo Isolation ---
         const wallet = await manager.findOne(Wallet, {
           where: {
             user: { id: user.id },
             currency,
             walletType: WalletType.SPOT,
           },
+          lock: { mode: 'pessimistic_write' },
         });
 
         if (wallet) {
           this.walletCalculationService.unlockBalance(wallet, amount);
+
+          // Recalculate balance để đảm bảo Consistency
+          this.walletCalculationService.recalculateBalance(wallet);
+
+          // Validate wallet state
+          if (!this.walletCalculationService.isValidWallet(wallet)) {
+            throw new Error(`Invalid wallet state after balance unlock for ${currency}`);
+          }
+
           await manager.save(wallet);
         }
       }
 
+      // --- Save orders trong transaction ---
       await manager.save(openOrders);
     });
 

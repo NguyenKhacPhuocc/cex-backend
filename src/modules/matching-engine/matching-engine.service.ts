@@ -154,15 +154,15 @@ export class MatchingEngineService implements OnModuleInit {
       // Market orders cannot remain OPEN - they must be filled or canceled
       // If not fully filled (partially filled or not filled at all), cancel it
       order.status = OrderStatus.CANCELED;
-      if (remainingAmount < order.amount) {
-        this.logger.log(
-          `Market order ${order.id} partially filled, canceling remaining ${remainingAmount} amount`,
-        );
-      } else {
-        this.logger.log(
-          `Market order ${order.id} could not be filled, canceling entire order (remaining: ${remainingAmount})`,
-        );
-      }
+      //   if (remainingAmount < order.amount) {
+      //     this.logger.log(
+      //       `Market order ${order.id} partially filled, canceling remaining ${remainingAmount} amount`,
+      //     );
+      //   } else {
+      //     this.logger.log(
+      //       `Market order ${order.id} could not be filled, canceling entire order (remaining: ${remainingAmount})`,
+      //     );
+      //   }
       // Emit WebSocket event to notify user about cancellation
       this.wsGateway.emitOrderUpdate(String(order.user.id), order.id, OrderStatus.CANCELED);
     } else if (remainingAmount < order.amount) {
@@ -307,9 +307,9 @@ export class MatchingEngineService implements OnModuleInit {
         if (frozenToUnlock > 0 && !isNaN(frozenToUnlock)) {
           this.walletCalculationService.unlockBalance(wallet, frozenToUnlock);
           await this.walletRepo.save(wallet);
-          this.logger.log(
-            `Unlocked ${frozenToUnlock} ${currencyToUnlock} for market ${order.side} order ${order.id} (filled: ${order.filled}, remaining: ${remainingAmount}, other orders frozen: ${totalFrozenFromOtherOrders})`,
-          );
+          //   this.logger.log(
+          //     `Unlocked ${frozenToUnlock} ${currencyToUnlock} for market ${order.side} order ${order.id} (filled: ${order.filled}, remaining: ${remainingAmount}, other orders frozen: ${totalFrozenFromOtherOrders})`,
+          //   );
           // Emit balance update to notify frontend about unlocked balance
           this.wsGateway.emitBalanceUpdate(String(order.user.id));
         } else if (frozenToUnlock === 0 && currentFrozenBalance > 0) {
@@ -461,9 +461,9 @@ export class MatchingEngineService implements OnModuleInit {
 
       try {
         await this.orderBookService.add(order);
-        this.logger.log(
-          `✅ Successfully added order ${order.id} (${order.side} ${order.market.symbol} @ ${order.price}) to orderbook`,
-        );
+        // this.logger.log(
+        //   `✅ Successfully added order ${order.id} (${order.side} ${order.market.symbol} @ ${order.price}) to orderbook`,
+        // );
       } catch (error) {
         this.logger.error(
           `  Failed to add order ${order.id} (${order.side} ${order.market.symbol} @ ${order.price}) to orderbook:`,
@@ -617,70 +617,16 @@ export class MatchingEngineService implements OnModuleInit {
       return;
     }
 
-    // --- Ghi bản ghi Trade ---
+    // --- Xác định buyer/seller và ví liên quan ---
     const buyOrder = takerOrder.side === OrderSide.BUY ? takerOrder : makerOrder;
     const sellOrder = takerOrder.side === OrderSide.SELL ? takerOrder : makerOrder;
-
-    const trade = this.tradeRepo.create({
-      market: takerOrder.market,
-      price: tradePrice,
-      amount: normalizedMatchedAmount,
-      buyOrder,
-      sellOrder,
-      buyer: buyOrder.user,
-      seller: sellOrder.user,
-      takerSide: takerOrder.side === OrderSide.BUY ? 'BUY' : 'SELL', // Save taker side for market display
-    });
-    await this.tradeRepo.save(trade);
-
-    // --- Xác định buyer/seller và ví liên quan ---
     const buyerUser = buyOrder.user;
     const sellerUser = sellOrder.user;
     const market = takerOrder.market;
 
-    const [buyerQuoteWallet, buyerBaseWallet, sellerBaseWallet, sellerQuoteWallet] =
-      await Promise.all([
-        this.walletRepo.findOne({
-          where: {
-            user: { id: buyerUser.id },
-            currency: market.quoteAsset,
-            walletType: WalletType.SPOT,
-          },
-        }),
-        this.walletRepo.findOne({
-          where: {
-            user: { id: buyerUser.id },
-            currency: market.baseAsset,
-            walletType: WalletType.SPOT,
-          },
-        }),
-        this.walletRepo.findOne({
-          where: {
-            user: { id: sellerUser.id },
-            currency: market.baseAsset,
-            walletType: WalletType.SPOT,
-          },
-        }),
-        this.walletRepo.findOne({
-          where: {
-            user: { id: sellerUser.id },
-            currency: market.quoteAsset,
-            walletType: WalletType.SPOT,
-          },
-        }),
-      ]);
-
-    if (!buyerQuoteWallet || !buyerBaseWallet || !sellerBaseWallet || !sellerQuoteWallet) {
-      this.logger.error(
-        `Cannot execute trade: missing wallets - buyerQuote: ${!!buyerQuoteWallet}, buyerBase: ${!!buyerBaseWallet}, sellerBase: ${!!sellerBaseWallet}, sellerQuote: ${!!sellerQuoteWallet}`,
-      );
-      return;
-    }
-
-    // --- Cập nhật ví khi có 2 user khác nhau ---
-    // Use transaction to prevent race conditions when multiple trades update same wallets
-    await this.dataSource.transaction(async (manager) => {
-      // Reload wallets within transaction with row-level locking to prevent race conditions
+    // --- TẤT CẢ OPERATIONS TRONG MỘT TRANSACTION ĐỂ ĐẢM BẢO ACID ---
+    const tradeId = await this.dataSource.transaction(async (manager) => {
+      // --- 1. Load wallets với pessimistic locking để đảm bảo Isolation ---
       const [
         lockedBuyerQuoteWallet,
         lockedBuyerBaseWallet,
@@ -689,25 +635,33 @@ export class MatchingEngineService implements OnModuleInit {
       ] = await Promise.all([
         manager.findOne(Wallet, {
           where: {
-            id: buyerQuoteWallet.id,
+            user: { id: buyerUser.id },
+            currency: market.quoteAsset,
+            walletType: WalletType.SPOT,
           },
           lock: { mode: 'pessimistic_write' },
         }),
         manager.findOne(Wallet, {
           where: {
-            id: buyerBaseWallet.id,
+            user: { id: buyerUser.id },
+            currency: market.baseAsset,
+            walletType: WalletType.SPOT,
           },
           lock: { mode: 'pessimistic_write' },
         }),
         manager.findOne(Wallet, {
           where: {
-            id: sellerBaseWallet.id,
+            user: { id: sellerUser.id },
+            currency: market.baseAsset,
+            walletType: WalletType.SPOT,
           },
           lock: { mode: 'pessimistic_write' },
         }),
         manager.findOne(Wallet, {
           where: {
-            id: sellerQuoteWallet.id,
+            user: { id: sellerUser.id },
+            currency: market.quoteAsset,
+            walletType: WalletType.SPOT,
           },
           lock: { mode: 'pessimistic_write' },
         }),
@@ -720,12 +674,18 @@ export class MatchingEngineService implements OnModuleInit {
         !lockedSellerQuoteWallet
       ) {
         this.logger.error(
-          `Cannot find wallets in transaction for trade: buyerQuote=${buyerQuoteWallet.id}, buyerBase=${buyerBaseWallet.id}, sellerBase=${sellerBaseWallet.id}, sellerQuote=${sellerQuoteWallet.id}`,
+          `Cannot find wallets in transaction for trade: buyerQuote=${lockedBuyerQuoteWallet?.id}, buyerBase=${lockedBuyerBaseWallet?.id}, sellerBase=${lockedSellerBaseWallet?.id}, sellerQuote=${lockedSellerQuoteWallet?.id}`,
         );
-        return;
+        throw new Error('Cannot find wallets for trade execution');
       }
 
-      // Use WalletCalculationService for all balance updates
+      // --- 2. Lưu balanceBefore để dùng cho ledger entries ---
+      const buyerQuoteBalanceBefore = Number(lockedBuyerQuoteWallet.balance);
+      const buyerBaseBalanceBefore = Number(lockedBuyerBaseWallet.balance);
+      const sellerBaseBalanceBefore = Number(lockedSellerBaseWallet.balance);
+      const sellerQuoteBalanceBefore = Number(lockedSellerQuoteWallet.balance);
+
+      // --- 3. Update wallet balances ---
       if (takerOrder.side === OrderSide.BUY) {
         // Buyer (taker): Unlock frozen quote, add available base
         this.walletCalculationService.subtractFromFrozen(lockedBuyerQuoteWallet, tradeValue);
@@ -764,7 +724,7 @@ export class MatchingEngineService implements OnModuleInit {
         lockedSellerQuoteWallet,
       );
 
-      // --- Kiểm tra an toàn ---
+      // --- 4. Validate wallet state để đảm bảo Consistency ---
       if (
         !this.walletCalculationService.areValidWallets(
           lockedBuyerQuoteWallet,
@@ -779,7 +739,26 @@ export class MatchingEngineService implements OnModuleInit {
         throw new Error('Invalid wallet state after trade calculation');
       }
 
-      // --- Ghi thay đổi vào DB trong transaction ---
+      // --- 5. Lưu balanceAfter để dùng cho ledger entries ---
+      const buyerQuoteBalanceAfter = Number(lockedBuyerQuoteWallet.balance);
+      const buyerBaseBalanceAfter = Number(lockedBuyerBaseWallet.balance);
+      const sellerBaseBalanceAfter = Number(lockedSellerBaseWallet.balance);
+      const sellerQuoteBalanceAfter = Number(lockedSellerQuoteWallet.balance);
+
+      // --- 6. Create Trade record (trong transaction) ---
+      const trade = manager.create(Trade, {
+        market: takerOrder.market,
+        price: tradePrice,
+        amount: normalizedMatchedAmount,
+        buyOrder,
+        sellOrder,
+        buyer: buyOrder.user,
+        seller: sellOrder.user,
+        takerSide: takerOrder.side === OrderSide.BUY ? 'BUY' : 'SELL',
+      });
+      const savedTrade = await manager.save(trade);
+
+      // --- 7. Save wallets (trong transaction) ---
       await manager.save([
         lockedBuyerQuoteWallet,
         lockedBuyerBaseWallet,
@@ -787,103 +766,104 @@ export class MatchingEngineService implements OnModuleInit {
         lockedSellerQuoteWallet,
       ]);
 
-      // Update wallet references for ledger entries (outside transaction but using updated values)
-      buyerQuoteWallet.available = lockedBuyerQuoteWallet.available;
-      buyerQuoteWallet.frozen = lockedBuyerQuoteWallet.frozen;
-      buyerQuoteWallet.balance = lockedBuyerQuoteWallet.balance;
-      buyerBaseWallet.available = lockedBuyerBaseWallet.available;
-      buyerBaseWallet.frozen = lockedBuyerBaseWallet.frozen;
-      buyerBaseWallet.balance = lockedBuyerBaseWallet.balance;
-      sellerBaseWallet.available = lockedSellerBaseWallet.available;
-      sellerBaseWallet.frozen = lockedSellerBaseWallet.frozen;
-      sellerBaseWallet.balance = lockedSellerBaseWallet.balance;
-      sellerQuoteWallet.available = lockedSellerQuoteWallet.available;
-      sellerQuoteWallet.frozen = lockedSellerQuoteWallet.frozen;
-      sellerQuoteWallet.balance = lockedSellerQuoteWallet.balance;
+      // --- 8. Create Transaction records (trong transaction) ---
+      const buyerTransaction = manager.create(Transaction, {
+        user: buyerUser,
+        wallet: lockedBuyerBaseWallet,
+        type: TransactionType.TRADE_BUY,
+        amount: normalizedMatchedAmount,
+        currency: market.baseAsset,
+        status: TransactionStatus.COMPLETED,
+        createdAt: new Date(),
+      });
+      const sellerTransaction = manager.create(Transaction, {
+        user: sellerUser,
+        wallet: lockedSellerQuoteWallet,
+        type: TransactionType.TRADE_SELL,
+        amount: tradeValue,
+        currency: market.quoteAsset,
+        status: TransactionStatus.COMPLETED,
+        createdAt: new Date(),
+      });
+      await manager.save([buyerTransaction, sellerTransaction]);
+
+      // --- 9. Create Ledger entries (trong transaction) ---
+      const ledgerEntries: LedgerEntry[] = [
+        // Buyer: giảm frozen quote
+        manager.create(LedgerEntry, {
+          user: { id: buyerUser.id },
+          wallet: { id: lockedBuyerQuoteWallet.id },
+          currency: market.quoteAsset,
+          changeAmount: -tradeValue,
+          balanceBefore: buyerQuoteBalanceBefore,
+          balanceAfter: buyerQuoteBalanceAfter,
+          referenceType: LedgerReferenceType.TRADE_BUY,
+          referenceId: String(savedTrade.id),
+          description: `Decrease frozen for buy order ${takerOrder.id}`,
+          createdAt: new Date(),
+        }),
+        // Buyer: tăng available base
+        manager.create(LedgerEntry, {
+          user: { id: buyerUser.id },
+          wallet: { id: lockedBuyerBaseWallet.id },
+          currency: market.baseAsset,
+          changeAmount: normalizedMatchedAmount,
+          balanceBefore: buyerBaseBalanceBefore,
+          balanceAfter: buyerBaseBalanceAfter,
+          referenceType: LedgerReferenceType.TRADE_BUY,
+          referenceId: String(savedTrade.id),
+          description: `Increase available for buy order ${takerOrder.id}`,
+          createdAt: new Date(),
+        }),
+        // Seller: giảm frozen base
+        manager.create(LedgerEntry, {
+          user: { id: sellerUser.id },
+          wallet: { id: lockedSellerBaseWallet.id },
+          currency: market.baseAsset,
+          changeAmount: -normalizedMatchedAmount,
+          balanceBefore: sellerBaseBalanceBefore,
+          balanceAfter: sellerBaseBalanceAfter,
+          referenceType: LedgerReferenceType.TRADE_SELL,
+          referenceId: String(savedTrade.id),
+          description: `Decrease frozen for sell order ${makerOrder.id}`,
+          createdAt: new Date(),
+        }),
+        // Seller: tăng available quote
+        manager.create(LedgerEntry, {
+          user: { id: sellerUser.id },
+          wallet: { id: lockedSellerQuoteWallet.id },
+          currency: market.quoteAsset,
+          changeAmount: tradeValue,
+          balanceBefore: sellerQuoteBalanceBefore,
+          balanceAfter: sellerQuoteBalanceAfter,
+          referenceType: LedgerReferenceType.TRADE_SELL,
+          referenceId: String(savedTrade.id),
+          description: `Increase available for sell order ${makerOrder.id}`,
+          createdAt: new Date(),
+        }),
+      ];
+      await manager.save(ledgerEntries);
+
+      // --- 10. Return trade ID for WebSocket events (sau transaction) ---
+      // Return trade ID so we can use it after transaction commits
+      return savedTrade.id;
     });
 
-    // --- Lưu bản ghi vào transactions ---
-    const buyerTransaction = this.transactionRepo.create({
-      user: buyerUser,
-      wallet: buyerBaseWallet,
-      type: TransactionType.TRADE_BUY,
-      amount: normalizedMatchedAmount,
-      currency: market.baseAsset,
-      status: TransactionStatus.COMPLETED,
-      createdAt: new Date(),
+    // Reload trade after transaction commits to get full entity with relations
+    const savedTrade = await this.tradeRepo.findOne({
+      where: { id: tradeId },
+      relations: ['market', 'buyOrder', 'sellOrder', 'buyer', 'seller'],
     });
-    const sellerTransaction = this.transactionRepo.create({
-      user: sellerUser,
-      wallet: sellerQuoteWallet,
-      type: TransactionType.TRADE_SELL,
-      amount: tradeValue,
-      currency: market.quoteAsset,
-      status: TransactionStatus.COMPLETED,
-      createdAt: new Date(),
-    });
-    await this.transactionRepo.save([buyerTransaction, sellerTransaction]);
 
-    // --- Lưu bản ghi vào ledger_entries ---
-    const ledgerEntries: LedgerEntry[] = [
-      // Buyer: giảm frozen quote
-      this.ledgerRepo.create({
-        user: { id: buyerUser.id },
-        wallet: { id: buyerQuoteWallet.id },
-        currency: market.quoteAsset,
-        changeAmount: -tradeValue,
-        balanceBefore: Number(buyerQuoteWallet.balance) + tradeValue,
-        balanceAfter: Number(buyerQuoteWallet.balance),
-        referenceType: LedgerReferenceType.TRADE_BUY,
-        referenceId: String(trade.id),
-        description: `Decrease frozen for buy order ${takerOrder.id}`,
-        createdAt: new Date(),
-      }),
-      // Buyer: tăng available base
-      this.ledgerRepo.create({
-        user: { id: buyerUser.id },
-        wallet: { id: buyerBaseWallet.id },
-        currency: market.baseAsset,
-        changeAmount: normalizedMatchedAmount,
-        balanceBefore: Number(buyerBaseWallet.balance) - normalizedMatchedAmount,
-        balanceAfter: Number(buyerBaseWallet.balance),
-        referenceType: LedgerReferenceType.TRADE_BUY,
-        referenceId: String(trade.id),
-        description: `Increase available for buy order ${takerOrder.id}`,
-        createdAt: new Date(),
-      }),
-      // Seller: giảm frozen base
-      this.ledgerRepo.create({
-        user: { id: sellerUser.id },
-        wallet: { id: sellerBaseWallet.id },
-        currency: market.baseAsset,
-        changeAmount: -normalizedMatchedAmount,
-        balanceBefore: Number(sellerBaseWallet.balance) + normalizedMatchedAmount,
-        balanceAfter: Number(sellerBaseWallet.balance),
-        referenceType: LedgerReferenceType.TRADE_SELL,
-        referenceId: String(trade.id),
-        description: `Decrease frozen for sell order ${makerOrder.id}`,
-        createdAt: new Date(),
-      }),
-      // Seller: tăng available quote
-      this.ledgerRepo.create({
-        user: { id: sellerUser.id },
-        wallet: { id: sellerQuoteWallet.id },
-        currency: market.quoteAsset,
-        changeAmount: tradeValue,
-        balanceBefore: Number(sellerQuoteWallet.balance) - tradeValue,
-        balanceAfter: Number(sellerQuoteWallet.balance),
-        referenceType: LedgerReferenceType.TRADE_SELL,
-        referenceId: String(trade.id),
-        description: `Increase available for sell order ${makerOrder.id}`,
-        createdAt: new Date(),
-      }),
-    ];
-    await this.ledgerRepo.save(ledgerEntries);
+    if (!savedTrade) {
+      this.logger.error(`Trade ${tradeId} not found after transaction commit`);
+      return;
+    }
 
     //   Aggregate trade into candles (fire-and-forget to avoid blocking)
     // Don't await - let it run in background so it doesn't delay order processing
     this.candlesService
-      .aggregateTradeToCandle(trade, [
+      .aggregateTradeToCandle(savedTrade, [
         Timeframe.ONE_MINUTE,
         Timeframe.FIVE_MINUTES,
         Timeframe.FIFTEEN_MINUTES,
@@ -905,7 +885,7 @@ export class MatchingEngineService implements OnModuleInit {
 
     //   Emit WebSocket events to notify users about trade execution
     this.wsGateway.emitTradeExecuted({
-      tradeId: String(trade.id),
+      tradeId: String(savedTrade.id),
       buyerId: String(buyerUser.id),
       sellerId: String(sellerUser.id),
       symbol: market.symbol,

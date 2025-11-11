@@ -87,23 +87,23 @@ export class LimitOrderBotStrategy extends BaseStrategy {
 
     // Prevent too frequent orders
     // Spread nhỏ hơn (0.05% - 0.2%) để giống Binance, tránh giá cao đột xuất
-    const spreadPercent = Math.random() * 0.0005 + 0.0001; // 0.02% - 0.08%
+    const spreadPercent = Math.random() * 0.0004 + 0.0001; // 0.01% - 0.05%
 
     // Random side
     const side = Math.random() > 0.5 ? OrderSide.BUY : OrderSide.SELL;
 
     // Chỉ dùng để tạo nhiều mức giá khác nhau, không làm giá lệch quá xa
     // Variation phải đảm bảo BUY luôn thấp hơn, SELL luôn cao hơn average
-    const priceVariation = (Math.random() - 0.5) * 0.0001; // ±0.005% variation (nhỏ hơn)
+    // const priceVariation = (Math.random() - 0.5) * 0.0001; // ±0.005% variation (nhỏ hơn)
 
     // Calculate price around average price ± spread với variation
     let price: number;
     if (side === OrderSide.BUY) {
       // Buy below average price
-      price = this.averagePrice * (1 - spreadPercent - Math.abs(priceVariation));
+      price = this.averagePrice * (1 - spreadPercent);
     } else {
       // Sell above average price
-      price = this.averagePrice * (1 + spreadPercent + Math.abs(priceVariation));
+      price = this.averagePrice * (1 + spreadPercent);
     }
 
     // Safety limit: giá không được lệch quá ±0.5% so với average price
@@ -140,7 +140,7 @@ export class LimitOrderBotStrategy extends BaseStrategy {
   }
 
   getInterval(): number {
-    // Random interval between 30-120 seconds (30000-120000ms) - much slower for realistic trading
-    return Math.floor(Math.random() * 90000) + 30000; // 30000
+    // Random interval between 10-30 seconds (10000-30000ms) - faster for more active trading
+    return Math.floor(Math.random() * 90000) + 30000; // 30000-90000ms
   }
 }

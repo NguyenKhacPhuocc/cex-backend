@@ -72,6 +72,7 @@ export class TradesService {
         { buyer: { id: user.id }, market: { symbol: symbol.toUpperCase() } },
         { seller: { id: user.id }, market: { symbol: symbol.toUpperCase() } },
       ],
+      take: 20,
       relations: ['market', 'buyer', 'seller'],
       order: { timestamp: 'DESC' },
     });

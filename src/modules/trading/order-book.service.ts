@@ -152,20 +152,27 @@ export class OrderBookService {
     const priceMap = new Map<number, { amount: number; total: number }>();
 
     // Aggregate asks (SELL orders)
+    // Only include orders that are OPEN or PARTIALLY_FILLED and have remaining amount
     askOrders
-      .filter((o) => o !== null)
+      .filter((o) => o !== null && (o.status === 'open' || o.status === 'partially_filled'))
       .forEach((order) => {
         const price = Number(order.price);
-        const amount = Number(order.amount);
+        const filled = Number(order.filled || 0);
+        const totalAmount = Number(order.amount);
+        const remainingAmount = totalAmount - filled; // Only show remaining (unfilled) amount
+
+        // Skip orders with no remaining amount (fully filled)
+        if (remainingAmount <= 0) return;
+
         const existing = priceMap.get(price);
 
         if (existing) {
-          existing.amount += amount;
+          existing.amount += remainingAmount;
           existing.total = existing.amount * price;
         } else {
           priceMap.set(price, {
-            amount,
-            total: amount * price,
+            amount: remainingAmount,
+            total: remainingAmount * price,
           });
         }
       });
@@ -176,26 +183,33 @@ export class OrderBookService {
         amount: data.amount,
         total: data.total,
       }))
-      .sort((a, b) => b.price - a.price); // Sort asks by price descending
+      .sort((a, b) => a.price - b.price); // Sort asks by price ASCENDING (lowest first = best ask)
 
     // Clear map for bids
     priceMap.clear();
 
     // Aggregate bids (BUY orders)
+    // Only include orders that are OPEN or PARTIALLY_FILLED and have remaining amount
     bidOrders
-      .filter((o) => o !== null)
+      .filter((o) => o !== null && (o.status === 'open' || o.status === 'partially_filled'))
       .forEach((order) => {
         const price = Number(order.price);
-        const amount = Number(order.amount);
+        const filled = Number(order.filled || 0);
+        const totalAmount = Number(order.amount);
+        const remainingAmount = totalAmount - filled; // Only show remaining (unfilled) amount
+
+        // Skip orders with no remaining amount (fully filled)
+        if (remainingAmount <= 0) return;
+
         const existing = priceMap.get(price);
 
         if (existing) {
-          existing.amount += amount;
+          existing.amount += remainingAmount;
           existing.total = existing.amount * price;
         } else {
           priceMap.set(price, {
-            amount,
-            total: amount * price,
+            amount: remainingAmount,
+            total: remainingAmount * price,
           });
         }
       });
